@@ -1,0 +1,914 @@
+<!DOCTYPE html>
+<html>
+	<head>
+	    <meta charset="utf-8">
+		<title>Math widget demo v0.7</title>
+		<!-- New: Intro side bar -->
+
+		<script>
+			window.MathJax = {
+				tex: {
+					inlineMath: {'[+]': [['$', '$']]},
+				},
+				chtml: {
+					scale: 1.04, // Scales the font size to 120%
+					matchFontHeight: false, // Prevents automatic height matching
+				},
+				svg: {
+					scale: 1.04,
+				},
+			};
+		</script>
+
+		<script id="MathJax-script" async src="https://cdn.jsdelivr.net/npm/mathjax@4/tex-mml-chtml.js">
+		</script>
+
+		<script>
+			var widget_spec = {
+
+				placeholder_text: "Type an equation, formula or math problem",
+				button_text: "Generate math",
+
+				progress_text: "Generating math",
+				progress_blink: "\xa0\xa0. . .",
+
+				text_id: "text-",
+				generate_id: "generate-",
+				toggle_prompt_id: "toggle-prompt-",
+				remove_id: "remove-",
+
+				min_prompt: 3,
+				scroll_margin: 60,
+
+				widgets: new Array(),
+				new_id: 0,
+			};
+
+			var api_spec = {
+
+				// From https://pantheon.corp.google.com/apis/credentials?inv=1&invt=AbskIg&project=padma-uxd
+				key: "AIzaSyAW2D1xrI7NuIsEb7eLhJLhZrenETAR-tM",
+
+				// See https://ai.google.dev/gemini-api/docs#rest
+				url: "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent",
+
+				method: "POST",
+			    headers: {
+					"Content-Type": "application/json"
+				},
+			};
+
+			async function generate_response(widget) {
+
+				// Prevent dollar signs from being treated as math delimiters
+				widget.input.replaceAll("$", "\$");
+
+				const url = api_spec.url + "?key=" + api_spec.key;
+				var request = {
+					"contents": [{
+						"parts": [{ "text": widget.input }]
+					}],
+					"systemInstruction": {
+						"parts": [
+							{ "text": ""
+								+ " You're a math wizard thats helps the user find mathematical expressions and solutions for their problems."
+								+ " You can also translate natural language into mathematical expressions when the user describes them."
+								+ " You usually generate one or more equations in response to prompts."
+								+ " Sometimes you provide an explanation of the equations you generate."
+								+ " You express equations with LaTeX."
+							},
+							{ "text": ""
+								+ " Assume that the user is writing software and needs to apply the math in a Python program."
+								+ " Generate a snippet of Python code they could use in their program."
+								+ " Do not include import statements in the python code."
+								+ " Write comments in python code on separate lines with \"#\" prefix."
+								+ " Indent lines in python code with 3 spaces."
+							},
+							{ "text": ""
+								+ " Return a Python code snippet and one or more equations as a JSON data structure in the following format "
+								+ " {"
+									+ " python: code_snippet,"
+									+ " equations: ["
+										+ " { latex, equation_1, text: explanation_1 },"
+										+ " { latex, equation_2, text: explanation_2 },"
+										+ " { latex, equation_3, text: explanation_3 },"
+										+ "..."
+									+ "]"
+								+ "}"
+								+ " where the \"python\" and \"text\" attributes are optional."
+								+ " If there's no code that's valuable to add then provide \"null\" for the \"python\" value."
+								+ " If there's no explanation that's valuable to add then provide \"null\" for the \"text\" value."
+							},
+							{ "text": ""
+								+ " The user interface will list the equations you return."
+								+ " If you return an explanation for an equation then it will be displayed above the equation."
+								+ " So if one explanation applies to several equations then it's best"
+								+ " to provide it for the first equation and have \"null\" explanations for the other equations."
+								+ " Provide a \"null\" explanation whenever the equation is self explanatory"
+								+ " or its meaning should be clear from the context (which includes the prompt)."
+							},
+							{ "text": "Use the present tense in explanations" },
+							{ "text": "Keep explanations brief" },
+							{ "text": "Delimit in-line LaTeX with single dollar signs $...$" }, // Replace input "$" with "\$"
+							{ "text": "If the user provides specific values then calculate specific values when possible." },
+							{ "text": ""
+								+ " If the user's prompt doesn't imply any mathematical expressions then return the following:"
+								+ " { equations: null }"
+							},
+						]
+					},
+					"generationConfig": {
+						"responseMimeType": "application/json"
+					}
+				};
+				var python = null;
+				var equations = null;
+				var error_message = null;
+
+				finish_input(widget);
+  			  	show_progress(widget);
+
+				try {
+
+					const response = await fetch(url, {
+						"method": api_spec.method,
+						"headers": api_spec.headers,
+						"body": JSON.stringify(request),
+					});
+				    if (!response.ok) throw new Error(`HTTP error - ${response.status}`);
+
+					json_response = await response.json();
+
+                    // Parse JSON
+                    if (json_response.candidates
+						&& json_response.candidates[0].content
+							&& json_response.candidates[0].content.parts
+								&& json_response.candidates[0].content.parts[0].text) {
+                        const json_text = json_response.candidates[0].content.parts[0].text;
+						//try { console.log("json text:" + JSON.stringify(json_text, null, 2)); }
+						//catch (ignore_error) {}
+                        const parsed_data = JSON.parse(json_text);
+                        python = parsed_data.python;
+                        equations = parsed_data.equations;
+                    } else {
+                        throw new Error("Unexpected API response structure");
+                    }
+				}
+				catch (error) {
+					error_message = "Error fetching or parsing Gemini response: " + error.message;
+				}
+
+				hide_progress(widget);
+
+				if (error_message == null) show_results(widget, python, equations);
+				else {
+					show_error(widget, error_message);
+					finish_output(widget);
+				}
+
+				add_widget();
+			}
+
+			function show_progress(widget) {
+				show_element(widget.progress);
+			}
+
+			function hide_progress(widget) {
+				hide_element(widget.progress);
+			}
+
+			function show_results(widget, python, equations) {
+
+				var error_message = null;
+				var code_panel, left_panel, right_panel, panel_content, div, value, n, i;
+
+				try {
+					if (equations == null) {
+
+						error_message = "Not math";
+
+					} else {
+
+						// Show equations
+						if (!Array.isArray(equations)) {
+
+							throw new Error("Expected an array of equations");
+
+						} else {
+
+							code_panel = get_new_element("div", "code");
+
+							// Show LaTeX - Add content in loop below
+							left_panel = get_new_element("div", "window");
+							code_panel.appendChild(left_panel);
+
+							// Show Python
+							right_panel = get_new_element("div", "window");
+							panel_content = get_new_element("div", "python");
+							code_panel.appendChild(right_panel);
+							right_panel.appendChild(panel_content);
+							if (python != null) {
+
+								add_tooltip(right_panel, "Select Python");
+								var html = python;
+								var indent1 = "   ";
+								var indent2 = "&nbsp;&nbsp;&nbsp;&nbsp;"
+								html = html.replace(/\n/g, "<br>");
+								html = html.replaceAll(indent1, indent2);
+								panel_content.innerHTML = html;
+
+							} else panel_content.textContent = "No code";
+
+							// Show LaTeX - one line per equation
+							panel_content = get_new_element("div", "latex");
+							left_panel.appendChild(panel_content);
+
+							for (n=0, i=0 ; i < equations.length ; i++) {
+
+								// Show explanatory text if needed
+								value = equations[i].text;
+								if (value != null) {
+
+									div = get_new_element("div", "text");
+									div.textContent = value;
+									widget.output.appendChild(div);
+
+									MathJax.typesetPromise([div]);
+								}
+
+								// Show math symbols
+								value = equations[i].latex;
+								value = value.replaceAll("$$", ""); // Gemini quirk
+								value = value.replaceAll("$", ""); // Too much?
+								if (value != null) {
+
+									div = get_new_element("div", "math");
+									div.textContent = "\\[" + value + "\\]";
+									widget.output.appendChild(div);
+									MathJax.typesetPromise([div]);
+
+									add_tooltip(left_panel, "Select LaTeX");
+									div = get_new_element("div");
+									panel_content.appendChild(div);
+									div.textContent = value;
+									n++;
+								}
+							}
+
+							if (n == 0) panel_content.textContent = "No LaTeX";
+
+							widget.output.appendChild(code_panel);
+						}
+					}
+				}
+				catch (error) {
+					error_message = "Error processing results: " + error.message;
+				}
+
+				if (error_message != null) show_error(widget, error_message);
+
+				widget.output.removeChild(widget.progress);
+				widget.progress = null;
+
+				finish_output(widget);
+			}
+
+			function show_error(widget, message=null) {
+
+				if (message == null) message = "Error";
+
+				widget.output.classList.add("error");
+				widget.output.appendChild(document.createTextNode(message));
+			}
+
+			function get_widget_from_event(event) {
+
+				var id = event.target.id;
+				var target_ids = [
+					widget_spec.text_id,
+					widget_spec.generate_id,
+					widget_spec.toggle_prompt_id,
+					widget_spec.remove_id,
+				];
+				var widget, i;
+
+				for (i=0 ; i < target_ids.length && id.indexOf(target_ids[i]) != 0 ; i++) ;
+				if (i == target_ids.length) return null;
+
+				id = id.slice(target_ids[i].length);
+				widget = widget_spec.widgets.find(function(object) { return (object.id == id); });
+				if (widget == undefined) return null;
+
+				return widget;
+			}
+
+			function send_prompt(event) {
+
+				var widget = get_widget_from_event(event);
+
+				widget.input = widget.textarea.value.trim();
+				generate_response(widget);
+			}
+
+			function listen_to_prompt(event) {
+
+				var widget = get_widget_from_event(event);
+				var input = widget.textarea.value.trim();
+
+				if (input.length < 3) widget.generate.classList.add('disabled');
+				else widget.generate.classList.remove('disabled');
+			}
+
+			function listen_to_typing(event) {
+
+				var textarea = event.target;
+				var input = textarea.value.trim();
+
+				if (event.keyCode != 13 || input.length < 3) return;
+				send_prompt(event);
+			}
+
+			function hide_element(div) { div.classList.add("hidden"); }
+			function show_element(div) { div.classList.remove("hidden"); }
+
+			function get_new_element(type, class_name=null, id=null) {
+				var div = document.createElement(type);
+				if (class_name != null) div.classList.add(class_name);
+				if (id != null) div.id = id;
+				return div;
+			}
+
+			function finish_input(widget) {
+
+				widget.prompt.removeChild(widget.textarea);
+				widget.textarea = null;
+
+				widget.prompt.removeChild(widget.generate);
+				widget.generate = null;
+			}
+
+			function finish_output(widget) {
+
+				widget.div.classList.add("complete");
+				add_tools(widget);
+				widget.prompt.appendChild(document.createTextNode(widget.input));
+			}
+
+			function add_tools(widget) {
+
+				var prompt_button = get_new_element("div", "toggle-prompt-button", widget_spec.toggle_prompt_id + widget.id);
+				var remove_button = get_new_element("div", "remove-button", widget_spec.remove_id + widget.id);
+
+				widget.tools = get_new_element("div", "tools");
+				widget.tools.appendChild(prompt_button);
+				widget.tools.appendChild(remove_button);
+				widget.div.appendChild(widget.tools);
+
+				prompt_button.addEventListener("click", toggle_prompt);
+				remove_button.addEventListener("click", remove_widget);
+
+				add_tooltip(prompt_button, "Show prompt");
+				add_tooltip(prompt_button, "Hide prompt", "hide");
+				add_tooltip(remove_button, "Delete block");
+			}
+
+			function add_tooltip(button, text, class_name=null) {
+
+				var tooltip = get_new_element("div", "tooltip");
+
+				if (class_name != null) tooltip.classList.add(class_name);
+
+				tooltip.textContent = text;
+				button.appendChild(tooltip);
+			}
+
+			function toggle_prompt(event) {
+
+				var widget = get_widget_from_event(event);
+				var button = document.getElementById(widget_spec.toggle_prompt_id + widget.id);
+
+				if (widget.prompt.classList.contains("show")) {
+					widget.prompt.classList.remove("show");
+					button.classList.remove("hide");
+				} else {
+					widget.prompt.classList.add("show");
+					button.classList.add("hide");
+				}
+			}
+
+			function close_intro() {
+
+				hide_element(document.getElementById("intro"));
+				show_element(document.getElementById("open-intro-button"));
+			}
+
+			function open_intro() {
+
+				show_element(document.getElementById("intro"));
+				hide_element(document.getElementById("open-intro-button"));
+			}
+
+			function remove_widget(event) {
+
+				var widget = get_widget_from_event(event);
+				var widget_layout = document.getElementById("widget-layout");
+				var i;
+
+				widget_layout.removeChild(widget.div);
+				widget.div = null;
+
+				for (i=0 ; i < widget_spec.widgets.length && widget_spec.widgets[i].id != widget.id ; i++) ;
+				if (i < widget_spec.widgets.length) widget_spec.widgets.splice(i, 1);
+			}
+
+			function add_widget() {
+
+				var new_id = widget_spec.new_id + 1;
+				widget_spec.new_id = new_id;
+
+				var widget_layout = document.getElementById("widget-layout");
+				var widget = {
+					input: null,
+					id: new_id,
+					div: get_new_element("div", "widget"),
+					prompt: get_new_element("div", "prompt"),
+					textarea: get_new_element("textarea", null, widget_spec.text_id + new_id),
+					generate: get_new_element("div", "generate-button", widget_spec.generate_id + new_id),
+					progress: get_new_element("div", "progress"),
+					output: get_new_element("div", "response"),
+					tools: null,
+				};
+				var div, span;
+
+				hide_element(widget.progress);
+				widget.generate.classList.add("disabled");
+
+				widget_spec.widgets.push(widget);
+				widget_layout.appendChild(widget.div);
+
+				widget.div.appendChild(widget.prompt);
+				widget.prompt.appendChild(widget.textarea);
+				widget.prompt.appendChild(widget.generate);
+
+				widget.div.appendChild(widget.output);
+				widget.output.appendChild(widget.progress);
+
+				widget.textarea.setAttribute("placeholder", widget_spec.placeholder_text);
+				widget.generate.textContent = widget_spec.button_text;
+
+				widget.progress.appendChild(document.createTextNode(widget_spec.progress_text));
+				span = get_new_element("span", "blink");
+				span.textContent = widget_spec.progress_blink;
+				widget.progress.appendChild(span);
+
+				widget.textarea.addEventListener("change", listen_to_prompt);
+				widget.textarea.addEventListener("input", listen_to_prompt);
+				widget.textarea.addEventListener("keypress", listen_to_typing);
+				widget.generate.addEventListener("click", send_prompt);
+
+				widget.textarea.focus();
+			}
+		</script>
+
+		<link href="https://fonts.googleapis.com/css?family=Google+Sans+Code&display=swap" rel="stylesheet">
+
+		<style>
+			body,
+			.page-layout {
+				margin: 0;
+				padding: 0;
+				overflow: hidden;
+			}
+			body,
+			textarea {
+				font-family: "Google Sans", Arial, sans-serif;
+				font-size: 16px;
+				line-height: 22px;
+				color: #000;
+			}
+			.page-layout {
+				display: flex;
+				flex-direction: row;
+				width: 100vw;
+				height: 100vh;
+			}
+			.demo {
+				width: 100%;
+				height: 100vh;
+				overflow: hidden;
+				position: relative;
+			}
+			.demo-layout {
+				width: 100%;
+				height: 100vh;
+				overflow-x: hidden;
+				overflow-y: scroll;
+			}
+			.demo-content {
+			    max-width: 760px;
+			    margin: 40px auto 80px auto;
+				overflow: hidden;
+			}
+			.widget {
+				position: relative;
+				border-radius: 8px;
+				border: 1px dashed #35978f;
+				margin-bottom: 8px;
+			}
+			.prompt {
+				display: grid;
+				grid-template-columns: repeat(2, min-content);
+				grid-column-gap: 16px;
+				margin-top: 12px;
+			}
+			.widget.complete .prompt {
+				display: none;
+				font-weight: 600;
+				color: #3c4043;
+				background-color: #ffffff;
+				border: 1px solid #bdc1c6;
+				padding: 6px 12px;
+				border-radius: 8px;
+				width: max-content;
+				height: max-content;
+				max-width: 520px;
+				margin: 0;
+			}
+			.widget.complete .prompt.show {
+				display: block;
+			}
+			textarea {
+				width: 520px;
+				padding: 8px 12px;
+				border: 1px solid #dadce0;
+				border-radius: 8px;
+				outline: none;
+				resize: none;
+				field-sizing: content;
+				min-height: 48px;
+			}
+			textarea::placeholder {
+				color: #9aa0a6;
+			}
+			.generate-button {
+				display: inline-block;
+				height: 32px;
+				line-height: 32px;
+				padding: 0 16px 0 10px;
+				border-radius: 16px;
+				white-space: nowrap;
+				font-weight: 500;
+				color: #5f6368;
+				background-color: #c8e9fd;
+				border-style: none;
+				user-select: none;
+				cursor: pointer;
+			}
+			.generate-button::before {
+				content: url("data:image/svg+xml; utf8, <svg width='20' height='20' xmlns='http://www.w3.org/2000/svg'><path d='M6.66663 15.83V4.17L15.83 10L6.67 15.83ZM8.33 12.79L12.71 10L8.33 7.21V12.79Z' fill='black' fill-opacity='0.65'/></svg>");
+				position: relative;
+				top: 5px;
+				margin-right: 4px;
+			}
+			.generate-button:hover {
+				filter: drop-shadow(0px 1px 1px rgba(0, 0, 0, 0.3));
+			}
+			.generate-button.disabled {
+				background-color: #ffffff;
+				border: 1px solid #bdc1c6;
+				opacity: 0.5;
+				pointer-events: none;
+			}
+			.progress {
+				color: #9aa0a6;
+				height: 200px;
+			}
+			.blink {
+				animation: blink 1s step-start infinite;
+				font-weight: bold;
+			}
+			@keyframes blink {
+				50% { opacity: 0; }
+			}
+			.response {
+				margin: 12px 12px;
+			}
+			.widget.complete:hover .response .code {
+				visibility: visible;
+				height: auto;
+			}
+			.response .code {
+				visibility: hidden;
+				height: 0;
+				display: grid;
+				grid-template-columns: 1fr 2fr;
+				grid-column-gap: 16px;
+				align-items: start;
+				margin 16px 0 12px 0;
+			}
+			.code .window {
+				position: relative;
+				cursor: pointer;
+				overflow: visible;
+			} 
+			.code .window .latex,
+			.code .window .python {
+				background-color: rgba(0, 0, 0, 0.03);
+				border: 1px solid rgba(0, 0, 0, 0.05);
+				border-radius: 8px;
+				padding: 8px 12px;
+				max-height: 240px;
+				overflow-y: auto;
+			}
+			.code .window .latex {
+				color: #a50e0e;
+				font-size: 13px;
+				line-height: 18px;
+				user-select: text;
+			}
+			.code .window .latex div:first-child {
+				margin-top: 3px;
+			}
+			.code .window .latex div:not(:first-child) {
+				margin-top: 8px;
+			}
+			.code .window .latex div {
+				user-select: all;
+			}
+			.code .window .python {
+				color: #1e8e3e;
+			    font-family: 'Google Sans Code', monospace;
+				font-size: 13px;
+				font-weight: 300;
+				line-height: 19px;
+				user-select: all;
+			}
+			.widget.complete:hover .tools {
+				display: flex;
+			}
+			.tools {
+				display: none;
+				position: absolute;
+				top: -2px;
+				right: -2px;
+				flex-direction: row;
+				column-gap: 8px;
+				padding: 0px 10px;
+				background-color: #fff;
+				border: 1px solid rgba(0, 0, 0, 0.05);
+				border-radius: 8px;
+			    filter: drop-shadow(0px 2px 2px rgba(0, 0, 0, 0.1));
+			}
+			.toggle-prompt-button,
+			.remove-button,
+			.close-intro-button,
+			.open-intro-button {
+				position: relative;
+				width: 32px;
+				height: 32px;
+				border-radius: 16px;
+				user-select: none;
+				cursor: pointer;
+			}
+			.tooltip {
+				visibility: hidden;
+				position: absolute;
+				z-index: 1;
+				top: 125%;
+				left: 50%;
+				transform: translateX(-50%);
+				font-size: 13px;
+				line-height: 16px;
+				color: #fff;
+				background-color: rgba(45, 45, 45, 1);
+				border-radius: 4px;
+				padding: 4px 8px;
+				white-space: nowrap;
+				filter: drop-shadow(0px 1px 1px rgba(0, 0, 0, 0.3));
+			}
+			.remove-button .tooltip { /* So tooltip isn't clipped by edge of container */
+			    left: auto;
+			    right: -4px;
+			    transform: none;
+			}
+			.close-intro-button:hover .tooltip,
+			.open-intro-button:hover .tooltip {
+				top: 50%;
+				left: -25%;
+				transform: translate(-100%, -50%);
+			}
+			.code .window:hover .tooltip {
+				top: -32px;
+			}
+			.toggle-prompt-button:hover .tooltip {
+				visibility: visible;
+			}
+			.toggle-prompt-button:hover .tooltip.hide {
+				visibility: hidden;
+			}
+			.toggle-prompt-button.hide:hover .tooltip {
+				visibility: hidden;
+			}
+			.toggle-prompt-button.hide:hover .tooltip.hide {
+				visibility: visible;
+			}
+			.remove-button:hover .tooltip,
+			.close-intro-button:hover .tooltip,
+			.open-intro-button:hover .tooltip,
+			.code .window:hover .tooltip {
+				visibility: visible;
+			}
+			.toggle-prompt-button::before {
+				content: url("data:image/svg+xml; utf8, <svg width='24' height='24' xmlns='http://www.w3.org/2000/svg' fill='black' fill-opacity='0.65'><path d='M2 20V5C2 4.45 2.19583 3.97917 2.5875 3.5875C2.97917 3.19583 3.45 3 4 3H16C16.55 3 17.0208 3.19583 17.4125 3.5875C17.8042 3.97917 18 4.45 18 5V9.5H16V5H4V15H8.5V17H5L2 20ZM6 9H14V7H6V9ZM6 13H9.5V11H6V13Z'/><path d='M17 20C15.4833 20 14.0833 19.6 12.8 18.8C11.5167 18 10.5833 16.9 10 15.5C10.5833 14.1 11.5167 13 12.8 12.2C14.0833 11.4 15.4833 11 17 11C18.5167 11 19.9167 11.4 21.2 12.2C22.4833 13 23.4167 14.1 24 15.5C23.4167 16.9 22.4833 18 21.2 18.8C19.9167 19.6 18.5167 20 17 20ZM17 18C17.95 18 18.8458 17.7833 19.6875 17.35C20.5292 16.9167 21.2167 16.3 21.75 15.5C21.2167 14.7 20.5292 14.0833 19.6875 13.65C18.8458 13.2167 17.95 13 17 13C16.05 13 15.1542 13.2167 14.3125 13.65C13.4708 14.0833 12.7833 14.7 12.25 15.5C12.7833 16.3 13.4708 16.9167 14.3125 17.35C15.1542 17.7833 16.05 18 17 18ZM17 17C16.5833 17 16.2292 16.8542 15.9375 16.5625C15.6458 16.2708 15.5 15.9167 15.5 15.5C15.5 15.0833 15.6458 14.7292 15.9375 14.4375C16.2292 14.1458 16.5833 14 17 14C17.4167 14 17.7708 14.1458 18.0625 14.4375C18.3542 14.7292 18.5 15.0833 18.5 15.5C18.5 15.9167 18.3542 16.2708 18.0625 16.5625C17.7708 16.8542 17.4167 17 17 17Z'/></svg>");
+			}
+			.toggle-prompt-button.hide::before {
+				content: url("data:image/svg+xml; utf8, <svg width='24' height='24' xmlns='http://www.w3.org/2000/svg' fill='black' fill-opacity='0.65'><path d='M2 20V5C2 4.45 2.19583 3.97917 2.5875 3.5875C2.97917 3.19583 3.45 3 4 3H17C17.55 3 18.0208 3.19583 18.4125 3.5875C18.8042 3.97917 19 4.45 19 5V9.5H17V5H4V15H12.5V17H5L2 20ZM6 9H15V7H6V9ZM6 13H13.5V11H6V13Z'/><path d='M18.525 15.95L16.4 18.05L15 16.65L17.1 14.525L15 12.4L16.4 11L18.525 13.1L20.65 11L22.05 12.4L19.95 14.525L22.05 16.65L20.65 18.05L18.525 15.95Z'/></svg>");
+			}
+			.remove-button::before {
+				content: url("data:image/svg+xml; utf8, <svg width='24' height='24' xmlns='http://www.w3.org/2000/svg'><path d='M7 21C6.45 21 5.97917 20.8042 5.5875 20.4125C5.19583 20.0208 5 19.55 5 19V6H4V4H9V3H15V4H20V6H19V19C19 19.55 18.8042 20.0208 18.4125 20.4125C18.0208 20.8042 17.55 21 17 21H7ZM17 6H7V19H17V6ZM9 17H11V8H9V17ZM13 17H15V8H13V17Z' fill='black' fill-opacity='0.65'/></svg>");
+			}
+			.close-intro-button::before {
+				content: url("data:image/svg+xml; utf8, <svg width='24' height='24' xmlns='http://www.w3.org/2000/svg'><path d='M6.4 19L5 17.6L10.6 12L5 6.4L6.4 5L12 10.6L17.6 5L19 6.4L13.4 12L19 17.6L17.6 19L12 13.4L6.4 19Z' fill='black' fill-opacity='0.65'/></svg>");
+			}
+			.open-intro-button::before {
+				content: url("data:image/svg+xml; utf8, <svg width='24' height='24' xmlns='http://www.w3.org/2000/svg'><path d='M11.95 18C12.3 18 12.5958 17.8792 12.8375 17.6375C13.0792 17.3958 13.2 17.1 13.2 16.75C13.2 16.4 13.0792 16.1042 12.8375 15.8625C12.5958 15.6208 12.3 15.5 11.95 15.5C11.6 15.5 11.3042 15.6208 11.0625 15.8625C10.8208 16.1042 10.7 16.4 10.7 16.75C10.7 17.1 10.8208 17.3958 11.0625 17.6375C11.3042 17.8792 11.6 18 11.95 18ZM11.05 14.15H12.9C12.9 13.6 12.9625 13.1667 13.0875 12.85C13.2125 12.5333 13.5667 12.1 14.15 11.55C14.5833 11.1167 14.925 10.7042 15.175 10.3125C15.425 9.92083 15.55 9.45 15.55 8.9C15.55 7.96667 15.2083 7.25 14.525 6.75C13.8417 6.25 13.0333 6 12.1 6C11.15 6 10.3792 6.25 9.7875 6.75C9.19583 7.25 8.78333 7.85 8.55 8.55L10.2 9.2C10.2833 8.9 10.4708 8.575 10.7625 8.225C11.0542 7.875 11.5 7.7 12.1 7.7C12.6333 7.7 13.0333 7.84583 13.3 8.1375C13.5667 8.42917 13.7 8.75 13.7 9.1C13.7 9.43333 13.6 9.74583 13.4 10.0375C13.2 10.3292 12.95 10.6 12.65 10.85C11.9167 11.5 11.4667 11.9917 11.3 12.325C11.1333 12.6583 11.05 13.2667 11.05 14.15ZM12 22C10.6167 22 9.31667 21.7375 8.1 21.2125C6.88333 20.6875 5.825 19.975 4.925 19.075C4.025 18.175 3.3125 17.1167 2.7875 15.9C2.2625 14.6833 2 13.3833 2 12C2 10.6167 2.2625 9.31667 2.7875 8.1C3.3125 6.88333 4.025 5.825 4.925 4.925C5.825 4.025 6.88333 3.3125 8.1 2.7875C9.31667 2.2625 10.6167 2 12 2C13.3833 2 14.6833 2.2625 15.9 2.7875C17.1167 3.3125 18.175 4.025 19.075 4.925C19.975 5.825 20.6875 6.88333 21.2125 8.1C21.7375 9.31667 22 10.6167 22 12C22 13.3833 21.7375 14.6833 21.2125 15.9C20.6875 17.1167 19.975 18.175 19.075 19.075C18.175 19.975 17.1167 20.6875 15.9 21.2125C14.6833 21.7375 13.3833 22 12 22ZM12 20C14.2333 20 16.125 19.225 17.675 17.675C19.225 16.125 20 14.2333 20 12C20 9.76667 19.225 7.875 17.675 6.325C16.125 4.775 14.2333 4 12 4C9.76667 4 7.875 4.775 6.325 6.325C4.775 7.875 4 9.76667 4 12C4 14.2333 4.775 16.125 6.325 17.675C7.875 19.225 9.76667 20 12 20Z' fill='black' fill-opacity='0.65'/></svg>");
+			}
+			.toggle-prompt-button::before,
+			.remove-button::before,
+			.close-intro-button::before,
+			.open-intro-button::before {
+				position: relative;
+				top: 4px;
+				left: 4px;
+			}
+			.toggle-prompt-button:hover,
+			.remove-button:hover,
+			.close-intro-button:hover,
+			.open-intro-button:hover {
+				background-color: #c8e9fd;
+			}
+			.error {
+				font-style: italic;
+				color: #c92786;
+			}
+			.top {
+				font-weight: 700;
+				color: #202124;
+			}
+			.demo .top {
+				margin-left: 12px;
+			}
+			.widget,
+			.demo .top {
+				border: 1px solid rgba(0, 0, 0, 0);
+			}
+			.widget.complete:hover {
+				border: 1px dashed #35978f;
+			}
+			.intro  {
+				flex: 0 0 360px;
+				display: flex;
+				flex-direction: column;
+				background-color: #f8fafd;
+				position: relative;
+			}
+			@media (min-width: 1400px) {
+				.intro {
+					flex: 0 0 480px;
+				}
+			}
+			@media (min-width: 1600px) {
+				.intro {
+					flex: 0 0 600px;
+				}
+			}
+			.intro-content {
+				padding: 40px 24px 20px 24px;
+				background-color: #ff000;
+				overflow-x: hidden;
+				overflow-y: auto;
+			}
+			.intro .example {
+				display: flex;
+				flex-direction: row;
+				flex-wrap: wrap;
+				align-items: center;
+			    justify-content: center;
+			}
+			.intro .input {
+				padding: 6px 12px;
+				text-align: center;
+				border: 1px solid #dadce0;
+				border-radius: 8px;
+				background-color: #fefeff;
+				user-select: all;
+			}
+			.intro .example .arrow::before {
+				content: url("data:image/svg+xml; utf8, <svg width='24' height='24' xmlns='http://www.w3.org/2000/svg'><path d='M17.5 16.5L16.075 15.1L18.175 13H3V11H18.175L16.1 8.9L17.525 7.5L22 12L17.5 16.5Z' fill='black' fill-opacity='0.75'/></svg>");
+				margin-left: 8px;
+				margin-right: 8px;
+			}
+			.close-intro-button,
+			.open-intro-button {
+				position: absolute;
+				top: 12px;
+				right: 20px;
+			}
+			.demo-layout,
+			.intro-content,
+			.code .window .latex,
+			.code .window .python {
+				scrollbar-width: thin;
+			}
+			div.hidden {
+				display: none;
+			}
+			#demo {
+				order: 2;
+			}
+			#intro  {
+				order: 1;
+				border-right: 1px solid #e8eaed;
+			}
+		</style>
+	</head>
+
+	<body onload="add_widget()">
+		<div class="page-layout">
+			<div class="demo" id="demo">
+				<div class="open-intro-button hidden" id="open-intro-button" onclick="open_intro()">
+					<div class="tooltip">Introduction and user guide</div>
+				</div>
+				<div class="demo-layout">
+					<div class="demo-content">
+						<div class="top">Math widget</div>
+						<div class="widget-layout" id="widget-layout"></div>
+					</div>
+				</div>
+			</div>
+			<div class="intro" id="intro">
+				<div class="close-intro-button" onclick="close_intro()">
+					<div class="tooltip">Close intro</div>
+				</div>
+				<div class="intro-content">
+					<div class="top">
+						Demo: LLM-powered digital math input
+					</div>
+					<p>
+						We're studying use cases where users edit math.
+						Here's an exploration of how LLMs might be used to make it easier to write math in digital tools.
+					</p>
+					<p>
+						Type mathematical expressions into the field on the right to generate their digital forms.
+						You can describe math informally, mixing natural language and code.
+						Type an expression the same way you might speak or code it without worrying too much about syntax.
+						For example:
+					</p>
+					<div class="example">
+						<div class="input">v of t = V peak omega t + theta v</div>
+						<div class="arrow"></div>
+						<div class="output">$$v(t) = V_{peak} \cos(\omega t + \theta_v)$$</div>
+					</div>
+					<p>
+						Type the name of an equation:
+					</p>
+					<div class="example">
+						<div class="input">cumulative normal</div>
+						<div class="arrow"></div>
+						<div class="output">$$\Phi(z) = \frac{1}{\sqrt{2\pi}} \int_{-\infty}^{z} e^{-t^2/2} dt$$</div>
+					</div>
+					<p>
+						Type the name of an algorithm:
+					</p>
+					<div class="example">
+						<div class="input">bezier curve</div>
+						<div class="arrow"></div>
+						<div class="output">$$B(t) = \sum_{i=0}^{n} \binom{n}{i} (1-t)^{n-i} t^i P_i \text{ ...}$$</div>
+					</div>
+					<p>
+						Describe a math problem:
+					</p>
+					<div class="example">
+						<div class="input">compound interest earned on<br>$500 for 18 months at 8%</div>
+						<div class="arrow"></div>
+						<div class="output">$$P(1 + \frac{r}{n})^{nt} = 500(1 + \frac{0.08}{1})^{(1)(1.5)} \text{ ...}$$</div>
+					</div>
+					<p>
+						Gemini's prompted for one or more equations based on your input.
+						Equations are generated as LaTeX but displayed in their natural form.
+						Gemini adds text if it thinks descriptions or framings are warranted.
+						LaTeX and Python are displayed when you hover over responses.
+					</p>
+					<p>
+						This seems to be a relatively easy way to generate equations
+						that could be entered into documents or software.
+						Yet it's not obvious how it fits into workflows
+						or what it might add to what code assistants already do.
+						Our next step is to study user journeys for work on specific math problems.
+					</p>
+				</div>
+			</div>
+		</div>
+	</body>
+
+</html>
