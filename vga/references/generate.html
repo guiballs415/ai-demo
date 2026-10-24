@@ -1,0 +1,502 @@
+<!DOCTYPE html>
+<html>
+
+<head>
+	<meta charset="utf-8">
+	<title>Generative demo template</title>
+
+	<script>
+		var widget_spec = {
+			placeholder_text: "Enter prompt",
+			button_text: "Generate response",
+			progress_text: "Generating response",
+			progress_blink: "\xa0\xa0. . .",
+			min_prompt: 1,
+		};
+
+		var api_spec = {
+
+			// Key: "Generate Web Things"
+			// Billing period: No time-limit
+			// Project: google.com:grux-shared
+			key: "AQ.Ab8RN6LA3ES2CT_M_sCXr3JVZOoAbtEvfa9HnFMpmxYfNQgLqQ",
+
+			// See https://ai.google.dev/gemini-api/docs#rest
+			url: "https://generativelanguage.googleapis.com/v1beta/models/gemini-3.5-flash:generateContent",
+
+			// Maximum number of attempts in case of HTTP errors (503, 429, 504)
+			retries: 5,
+		};
+
+		async function generate_response(widget, is_regenerate = false) {
+
+			const url = api_spec.url + "?key=" + api_spec.key;
+			var request = {
+				"contents": [{
+					"parts": [{ "text": widget.input }]
+				}],
+				"systemInstruction": {
+					"parts": [
+						{ "text": "Generate the simplest intelligent response to the user's prompt" }
+					]
+				},
+			};
+			var error_message = null;
+			var response_text = null;
+
+			finish_input(widget);
+			if (!widget.div.classList.contains("complete")) {
+				widget.div.classList.add("complete");
+				widget.prompt.appendChild(document.createTextNode(widget.input));
+			}
+			if (widget.tools) widget.tools.classList.add("hidden");
+			show_progress(widget);
+
+			for (let i = 0; i < api_spec.retries; i++) {
+				try {
+					const response = await fetch(url, {
+						"method": "POST",
+						"headers": { "Content-Type": "application/json" },
+						"body": JSON.stringify(request),
+					});
+
+					if (!response.ok) {
+						if (i < api_spec.retries - 1) {
+							let attempt_str = (i >= 2) ? ` (attempt ${i + 1})` : "";
+							widget.output.innerHTML = `Error ${response.status}, retrying${attempt_str}<span class="blink">${widget_spec.progress_blink}</span>`;
+							await new Promise(resolve => setTimeout(resolve, 1000 * (i + 1)));
+							continue;
+						}
+						throw new Error(`HTTP error - ${response.status}`);
+					}
+
+					json_response = await response.json();
+					response_text = json_response.candidates?.[0]?.content?.parts?.[0]?.text;
+					if (!response_text) throw new Error("Unexpected API response structure");
+
+					error_message = null;
+					break;
+				}
+				catch (error) {
+					error_message = "Error fetching Gemini response: " + error.message;
+					break;
+				}
+			}
+
+			hide_progress(widget);
+
+			if (error_message == null) show_results(widget, response_text);
+			else {
+				show_error(widget, error_message);
+				finish_output(widget);
+			}
+
+			if (!is_regenerate) {
+				add_widget();
+			}
+		}
+
+		function show_progress(widget) {
+			widget.output.innerHTML = widget_spec.progress_text + '<span class="blink">' + widget_spec.progress_blink + '</span>';
+		}
+
+		function hide_progress(widget) {
+			widget.output.textContent = '';
+		}
+
+		function show_results(widget, text) {
+			widget.output.textContent = text;
+			finish_output(widget);
+		}
+
+		function show_error(widget, message = "Error") {
+			widget.output.classList.add("error");
+			widget.output.textContent = message;
+		}
+
+		function get_widget_from_event(event) {
+			var widget_div = event.target.closest(".widget");
+			return widget_div ? widget_div._widget : null;
+		}
+
+		function send_prompt(event) {
+
+			var widget = get_widget_from_event(event);
+
+			widget.input = widget.textarea.value.trim();
+			generate_response(widget);
+		}
+
+		function listen_to_prompt(event) {
+
+			var widget = get_widget_from_event(event);
+			var input = widget.textarea.value.trim();
+
+			if (input.length < widget_spec.min_prompt) widget.generate.classList.add('disabled');
+			else widget.generate.classList.remove('disabled');
+		}
+
+		function listen_to_typing(event) {
+
+			var textarea = event.target;
+			var input = textarea.value.trim();
+
+			if (event.keyCode != 13 || input.length < widget_spec.min_prompt) return;
+			send_prompt(event);
+		}
+
+
+		function get_new_element(type, class_name = null) {
+			var div = document.createElement(type);
+			if (class_name != null) div.classList.add(class_name);
+			return div;
+		}
+
+		function finish_input(widget) {
+			if (widget.textarea) {
+				widget.prompt.removeChild(widget.textarea);
+				widget.textarea = null;
+			}
+			if (widget.generate) {
+				widget.prompt.removeChild(widget.generate);
+				widget.generate = null;
+			}
+		}
+
+		function finish_output(widget) {
+			widget.div.classList.add("complete");
+			if (!widget.tools) {
+				add_tools(widget);
+			} else {
+				widget.tools.classList.remove("hidden");
+			}
+		}
+
+		function add_tools(widget) {
+			var regenerate_button = get_new_element("div", "regenerate-button");
+			var remove_button = get_new_element("div", "remove-button");
+			widget.tools = get_new_element("div", "tools");
+			widget.tools.appendChild(regenerate_button);
+			widget.tools.appendChild(remove_button);
+			widget.prompt.appendChild(widget.tools);
+			add_tooltip(regenerate_button, "Regenerate response");
+			add_tooltip(remove_button, "Delete prompt and response");
+		}
+
+		function add_tooltip(button, text, class_name = null) {
+
+			var tooltip = get_new_element("div", "tooltip");
+
+			if (class_name != null) tooltip.classList.add(class_name);
+
+			tooltip.textContent = text;
+			button.appendChild(tooltip);
+		}
+
+		function remove_widget(event) {
+			var widget = get_widget_from_event(event);
+			if (widget) {
+				widget.div.remove();
+			}
+		}
+
+		function add_widget() {
+			var widget_layout = document.getElementById("widget-layout");
+			var widget = {
+				input: null,
+				div: get_new_element("div", "widget"),
+				prompt: get_new_element("div", "prompt"),
+				textarea: get_new_element("textarea"),
+				generate: get_new_element("div", "generate-button"),
+				output: get_new_element("div", "response"),
+				tools: null,
+			};
+
+			widget.div._widget = widget;
+			widget.generate.classList.add("disabled");
+
+			widget_layout.appendChild(widget.div);
+
+			widget.div.appendChild(widget.prompt);
+			widget.prompt.appendChild(widget.textarea);
+			widget.prompt.appendChild(widget.generate);
+
+			widget.div.appendChild(widget.output);
+
+			widget.textarea.setAttribute("placeholder", widget_spec.placeholder_text);
+			widget.generate.textContent = widget_spec.button_text;
+
+			widget.textarea.focus();
+			var layout = document.getElementById("layout");
+			layout.scrollTo({ top: layout.scrollHeight, behavior: "smooth" });
+		}
+
+		function initialize_widgets() {
+
+			var widget_layout = document.getElementById("widget-layout");
+
+			widget_layout.addEventListener("click", function (event) {
+				var target = event.target;
+				if (target.closest(".generate-button")) {
+					send_prompt(event);
+				} else if (target.closest(".remove-button")) {
+					remove_widget(event);
+				} else if (target.closest(".regenerate-button")) {
+					var widget = get_widget_from_event(event);
+					if (widget) {
+						generate_response(widget, true);
+					}
+				}
+			});
+
+			widget_layout.addEventListener("input", function (event) {
+				if (event.target.tagName === "TEXTAREA") {
+					listen_to_prompt(event);
+				}
+			});
+
+			widget_layout.addEventListener("change", function (event) {
+				if (event.target.tagName === "TEXTAREA") {
+					listen_to_prompt(event);
+				}
+			});
+
+			widget_layout.addEventListener("keypress", function (event) {
+				if (event.target.tagName === "TEXTAREA") {
+					listen_to_typing(event);
+				}
+			});
+
+			add_widget();
+		}
+	</script>
+
+
+
+	<style>
+		body {
+			margin: 0;
+			padding: 0;
+			overflow: hidden;
+		}
+
+		body,
+		textarea {
+			font-family: "Google Sans", Arial, sans-serif;
+			font-size: 16px;
+			line-height: 22px;
+			color: #000;
+		}
+
+		.page-layout {
+			width: 100%;
+			height: 100vh;
+			overflow-x: hidden;
+			overflow-y: scroll;
+		}
+
+		.generative-content {
+			max-width: 760px;
+			margin: 40px auto 80px auto;
+			overflow: hidden;
+		}
+
+		.widget {
+			position: relative;
+			border-radius: 8px;
+			margin-bottom: 8px;
+		}
+
+		.prompt {
+			display: grid;
+			grid-template-columns: repeat(2, min-content);
+			grid-column-gap: 16px;
+			margin: 0;
+		}
+
+		.widget.complete .prompt {
+			display: flex;
+			align-items: center;
+			column-gap: 8px;
+			font-weight: 500;
+			color: #3c4043;
+			background-color: #ffffff;
+			border: 1px solid #bdc1c6;
+			padding: 6px 12px;
+			border-radius: 8px;
+			width: max-content;
+			height: max-content;
+			min-height: 32px;
+			max-width: 520px;
+		}
+
+		textarea {
+			width: 520px;
+			padding: 8px 12px;
+			border: 1px solid #dadce0;
+			border-radius: 8px;
+			outline: none;
+			resize: none;
+			field-sizing: content;
+			min-height: 48px;
+			margin-top: 2px;
+			margin-left: 1px;
+		}
+
+		textarea::placeholder {
+			color: #9aa0a6;
+		}
+
+		.generate-button {
+			display: inline-block;
+			height: 32px;
+			line-height: 32px;
+			padding: 0 16px 0 10px;
+			border-radius: 16px;
+			white-space: nowrap;
+			font-weight: 500;
+			color: #5f6368;
+			background-color: #c8e9fd;
+			border-style: none;
+			user-select: none;
+			cursor: pointer;
+		}
+
+		.generate-button::before {
+			content: url("data:image/svg+xml; utf8, <svg width='20' height='20' xmlns='http://www.w3.org/2000/svg'><path d='M6.66663 15.83V4.17L15.83 10L6.67 15.83ZM8.33 12.79L12.71 10L8.33 7.21V12.79Z' fill='black' fill-opacity='0.65'/></svg>");
+			position: relative;
+			top: 5px;
+			margin-right: 4px;
+		}
+
+		.generate-button:hover {
+			filter: drop-shadow(0px 1px 1px rgba(0, 0, 0, 0.3));
+		}
+
+		.generate-button.disabled {
+			background-color: #ffffff;
+			border: 1px solid #bdc1c6;
+			opacity: 0.5;
+			pointer-events: none;
+		}
+
+		.blink {
+			animation: blink 1s step-start infinite;
+			font-weight: bold;
+		}
+
+		@keyframes blink {
+			50% {
+				opacity: 0;
+			}
+		}
+
+		.response {
+			margin: 12px 12px;
+		}
+
+		.tools {
+			display: flex;
+			flex-direction: row;
+			column-gap: 8px;
+			align-items: center;
+		}
+
+		.remove-button,
+		.regenerate-button {
+			position: relative;
+			width: 32px;
+			height: 32px;
+			border-radius: 16px;
+			user-select: none;
+			cursor: pointer;
+		}
+
+		.tooltip {
+			visibility: hidden;
+			position: absolute;
+			z-index: 1;
+			top: 125%;
+			left: 50%;
+			transform: translateX(-50%);
+			font-size: 13px;
+			line-height: 16px;
+			color: #fff;
+			background-color: rgba(45, 45, 45, 1);
+			border-radius: 4px;
+			padding: 4px 8px;
+			white-space: nowrap;
+			filter: drop-shadow(0px 1px 1px rgba(0, 0, 0, 0.3));
+		}
+
+		.remove-button .tooltip {
+			/* So tooltip isn't clipped by edge of container */
+			left: auto;
+			right: -4px;
+			transform: none;
+		}
+
+		.remove-button:hover .tooltip,
+		.regenerate-button:hover .tooltip {
+			visibility: visible;
+		}
+
+		.remove-button::before {
+			content: url("data:image/svg+xml; utf8, <svg width='24' height='24' xmlns='http://www.w3.org/2000/svg'><path d='M7 21C6.45 21 5.97917 20.8042 5.5875 20.4125C5.19583 20.0208 5 19.55 5 19V6H4V4H9V3H15V4H20V6H19V19C19 19.55 18.8042 20.0208 18.4125 20.4125C18.0208 20.8042 17.55 21 17 21H7ZM17 6H7V19H17V6ZM9 17H11V8H9V17ZM13 17H15V8H13V17Z' fill='black' fill-opacity='0.65'/></svg>");
+			position: relative;
+			top: 4px;
+			left: 4px;
+		}
+
+		.regenerate-button::before {
+			content: url("data:image/svg+xml; utf8, <svg width='24' height='24'  xmlns='http://www.w3.org/2000/svg'><path d='M12 20C9.76667 20 7.875 19.225 6.325 17.675C4.775 16.125 4 14.2333 4 12C4 9.76667 4.775 7.875 6.325 6.325C7.875 4.775 9.76667 4 12 4C13.15 4 14.25 4.2375 15.3 4.7125C16.35 5.1875 17.25 5.86667 18 6.75V4H20V11H13V9H17.2C16.6667 8.06667 15.9375 7.33333 15.0125 6.8C14.0875 6.26667 13.0833 6 12 6C10.3333 6 8.91667 6.58333 7.75 7.75C6.58333 8.91667 6 10.3333 6 12C6 13.6667 6.58333 15.0833 7.75 16.25C8.91667 17.4167 10.3333 18 12 18C13.2833 18 14.4417 17.6333 15.475 16.9C16.5083 16.1667 17.2333 15.2 17.65 14H19.75C19.2833 15.7667 18.3333 17.2083 16.9 18.325C15.4667 19.4417 13.8333 20 12 20Z' fill='black' fill-opacity='0.65'/></svg>");
+			position: relative;
+			top: 4px;
+			left: 4px;
+		}
+
+		.remove-button:hover,
+		.regenerate-button:hover {
+			background-color: #c8e9fd;
+		}
+
+		.error {
+			font-style: italic;
+			color: #c92786;
+		}
+
+		.top {
+			font-weight: 700;
+			color: #202124;
+		}
+
+		.page-layout .top {
+			margin-left: 12px;
+			margin-bottom: 12px;
+		}
+
+		.widget,
+		.page-layout .top {
+			border: 1px solid rgba(0, 0, 0, 0);
+		}
+
+		.page-layout {
+			scrollbar-width: thin;
+		}
+
+		.hidden {
+			display: none;
+		}
+	</style>
+</head>
+
+<body onload="initialize_widgets()">
+	<div class="page-layout" id="layout">
+		<div class="generative-content">
+			<div class="top">Generic response generator</div>
+			<div class="widget-layout" id="widget-layout"></div>
+		</div>
+	</div>
+</body>
+
+</html>
