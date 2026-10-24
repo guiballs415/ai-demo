@@ -3,31 +3,26 @@
 
 <head>
 	<meta charset="utf-8">
-	<title>Visual question answering</title>
+	<title>Question answering</title>
 
 	<script>
 		var widget_spec = {
-			placeholder_text: "Ask a question about the image",
+			placeholder_text: "Enter prompt",
 			button_text: "Ask",
-			progress_text: "Looking at the image",
+			progress_text: "Generating response",
 			progress_blink: "\xa0\xa0. . .",
 			min_prompt: 1,
-			// Images are downscaled so the longest side is at most this many pixels
-			max_image_size: 1536,
 		};
-
-		// The image currently loaded in the image panel: { data, mime_type, url }
-		var current_image = null;
 
 		var api_spec = {
 
-			// Key: "Generate Web Things"
-			// Billing period: No time-limit
-			// Project: google.com:grux-shared
-			key: "AQ.Ab8RN6LA3ES2CT_M_sCXr3JVZOoAbtEvfa9HnFMpmxYfNQgLqQ",
+			// The OpenAI API key is entered on the page and kept in this browser's
+			// localStorage, so it is never committed to the repository
+			key_storage: "vqa_openai_key",
 
-			// See https://ai.google.dev/gemini-api/docs#rest
-			url: "https://generativelanguage.googleapis.com/v1beta/models/gemini-3.5-flash:generateContent",
+			// See https://platform.openai.com/docs/api-reference/chat/create
+			url: "https://api.openai.com/v1/chat/completions",
+			model: "gpt-5.5",
 
 			// Maximum number of attempts in case of HTTP errors (503, 429, 504)
 			retries: 5,
@@ -35,28 +30,13 @@
 
 		async function generate_response(widget, is_regenerate = false) {
 
-			const url = api_spec.url + "?key=" + api_spec.key;
-
-			// Each question stays tied to the image it was asked about
-			if (!is_regenerate) widget.image = current_image;
-			if (!widget.image) {
-				widget.output.textContent = "";
-				show_error(widget, "Add an image first");
-				return;
-			}
-
+			const key = get_api_key();
 			var request = {
-				"contents": [{
-					"parts": [
-						{ "inline_data": { "mime_type": widget.image.mime_type, "data": widget.image.data } },
-						{ "text": widget.input }
-					]
-				}],
-				"systemInstruction": {
-					"parts": [
-						{ "text": "Answer the user's question about the image concisely and accurately. Base the answer only on what is visible in the image; if the image does not contain the answer, say so." }
-					]
-				},
+				"model": api_spec.model,
+				"messages": [
+					{ "role": "system", "content": "Generate the simplest intelligent response to the user's prompt" },
+					{ "role": "user", "content": widget.input },
+				],
 			};
 			var error_message = null;
 			var response_text = null;
@@ -64,41 +44,52 @@
 			finish_input(widget);
 			if (!widget.div.classList.contains("complete")) {
 				widget.div.classList.add("complete");
-				var thumbnail = get_new_element("img", "thumbnail");
-				thumbnail.src = widget.image.url;
-				widget.prompt.appendChild(thumbnail);
 				widget.prompt.appendChild(document.createTextNode(widget.input));
 			}
 			if (widget.tools) widget.tools.classList.add("hidden");
 			show_progress(widget);
 
+			if (!key) {
+				hide_progress(widget);
+				show_error(widget, "Enter your OpenAI API key above");
+				finish_output(widget);
+				if (!is_regenerate) add_widget();
+				return;
+			}
+
 			for (let i = 0; i < api_spec.retries; i++) {
 				try {
-					const response = await fetch(url, {
+					const response = await fetch(api_spec.url, {
 						"method": "POST",
-						"headers": { "Content-Type": "application/json" },
+						"headers": {
+							"Content-Type": "application/json",
+							"Authorization": "Bearer " + key,
+						},
 						"body": JSON.stringify(request),
 					});
 
 					if (!response.ok) {
-						if (i < api_spec.retries - 1) {
+						// Only rate limits and server errors are worth retrying
+						var retryable = response.status == 429 || response.status >= 500;
+						if (retryable && i < api_spec.retries - 1) {
 							let attempt_str = (i >= 2) ? ` (attempt ${i + 1})` : "";
 							widget.output.innerHTML = `Error ${response.status}, retrying${attempt_str}<span class="blink">${widget_spec.progress_blink}</span>`;
 							await new Promise(resolve => setTimeout(resolve, 1000 * (i + 1)));
 							continue;
 						}
-						throw new Error(`HTTP error - ${response.status}`);
+						var detail = (await response.json().catch(() => null))?.error?.message;
+						throw new Error(`HTTP error - ${response.status}` + (detail ? ": " + detail : ""));
 					}
 
 					json_response = await response.json();
-					response_text = json_response.candidates?.[0]?.content?.parts?.[0]?.text;
+					response_text = json_response.choices?.[0]?.message?.content;
 					if (!response_text) throw new Error("Unexpected API response structure");
 
 					error_message = null;
 					break;
 				}
 				catch (error) {
-					error_message = "Error fetching Gemini response: " + error.message;
+					error_message = "Error fetching OpenAI response: " + error.message;
 					break;
 				}
 			}
@@ -231,7 +222,6 @@
 				generate: get_new_element("div", "generate-button"),
 				output: get_new_element("div", "response"),
 				tools: null,
-				image: null,
 			};
 
 			widget.div._widget = widget;
@@ -289,103 +279,32 @@
 				}
 			});
 
-			initialize_image_panel();
+			initialize_key_panel();
 			add_widget();
 		}
 
-		// Image panel: click to browse, drag and drop, or paste
+		// API key panel: the key is stored only in this browser
 
-		function initialize_image_panel() {
-
-			var panel = document.getElementById("image-panel");
-			var file_input = document.getElementById("file-input");
-
-			panel.addEventListener("click", function () { file_input.click(); });
-			panel.addEventListener("keydown", function (event) {
-				if (event.key === "Enter" || event.key === " ") {
-					event.preventDefault();
-					file_input.click();
-				}
-			});
-			file_input.addEventListener("change", function () {
-				if (file_input.files.length) load_image(file_input.files[0]);
-				file_input.value = "";
-			});
-
-			panel.addEventListener("dragover", function (event) {
-				event.preventDefault();
-				panel.classList.add("dragging");
-			});
-			panel.addEventListener("dragleave", function () {
-				panel.classList.remove("dragging");
-			});
-			panel.addEventListener("drop", function (event) {
-				event.preventDefault();
-				panel.classList.remove("dragging");
-				var file = event.dataTransfer.files[0];
-				if (file) load_image(file);
-			});
-
-			document.addEventListener("paste", function (event) {
-				for (const item of event.clipboardData.items) {
-					if (item.type.startsWith("image/")) {
-						event.preventDefault();
-						load_image(item.getAsFile());
-						return;
-					}
-				}
-			});
+		function get_api_key() {
+			var input = document.getElementById("api-key");
+			return input.value.trim();
 		}
 
-		function load_image(file) {
+		function initialize_key_panel() {
 
-			var message = document.getElementById("image-message");
+			var input = document.getElementById("api-key");
 
-			if (!file.type.startsWith("image/")) {
-				message.textContent = "That file isn't an image";
-				message.classList.add("error");
-				return;
-			}
+			try {
+				input.value = localStorage.getItem(api_spec.key_storage) || "";
+			} catch (error) { }
 
-			var source_url = URL.createObjectURL(file);
-			var img = new Image();
-
-			img.onload = function () {
-				// Downscale large images and re-encode as JPEG to keep requests small
-				var scale = Math.min(1, widget_spec.max_image_size / Math.max(img.width, img.height));
-				var canvas = document.createElement("canvas");
-				canvas.width = Math.round(img.width * scale);
-				canvas.height = Math.round(img.height * scale);
-				var context = canvas.getContext("2d");
-				context.fillStyle = "#fff";
-				context.fillRect(0, 0, canvas.width, canvas.height);
-				context.drawImage(img, 0, 0, canvas.width, canvas.height);
-				URL.revokeObjectURL(source_url);
-
-				var data_url = canvas.toDataURL("image/jpeg", 0.9);
-				current_image = {
-					data: data_url.split(",")[1],
-					mime_type: "image/jpeg",
-					url: data_url,
-				};
-
-				var preview = document.getElementById("image-preview");
-				preview.src = data_url;
-				document.getElementById("image-panel").classList.add("loaded");
-				message.textContent = "Click, drop or paste to replace the image";
-				message.classList.remove("error");
-
-				var textarea = document.querySelector(".widget-layout textarea");
-				if (textarea) textarea.focus();
-			};
-
-			img.onerror = function () {
-				URL.revokeObjectURL(source_url);
-				message.textContent = "Couldn't read that image";
-				message.classList.add("error");
-			};
-
-			img.src = source_url;
+			input.addEventListener("input", function () {
+				try {
+					var key = input.value.trim();
+					if (key) localStorage.setItem(api_spec.key_storage, key);
+					else localStorage.removeItem(api_spec.key_storage);
+				} catch (error) { }
+			});
 		}
 	</script>
 
@@ -606,59 +525,29 @@
 			display: none;
 		}
 
-		.image-panel {
+		.key-panel {
 			display: flex;
-			flex-direction: column;
 			align-items: center;
-			justify-content: center;
-			row-gap: 8px;
-			min-height: 160px;
-			margin-bottom: 24px;
-			padding: 16px;
-			border: 1px dashed #bdc1c6;
-			border-radius: 8px;
+			column-gap: 8px;
+			margin: 0 12px 24px 12px;
+			font-size: 14px;
 			color: #5f6368;
-			cursor: pointer;
-			user-select: none;
+		}
+
+		.key-panel input {
+			flex: 1;
+			max-width: 360px;
+			min-width: 0;
+			font-family: inherit;
+			font-size: 14px;
+			padding: 6px 10px;
+			border: 1px solid #dadce0;
+			border-radius: 8px;
 			outline: none;
 		}
 
-		.image-panel:hover,
-		.image-panel:focus-visible,
-		.image-panel.dragging {
+		.key-panel input:focus {
 			border-color: #1a73e8;
-			background-color: #f1f8fe;
-		}
-
-		.image-panel::before {
-			content: url("data:image/svg+xml; utf8, <svg width='32' height='32' viewBox='0 0 24 24' xmlns='http://www.w3.org/2000/svg'><path d='M5 21C4.45 21 3.97917 20.8042 3.5875 20.4125C3.19583 20.0208 3 19.55 3 19V5C3 4.45 3.19583 3.97917 3.5875 3.5875C3.97917 3.19583 4.45 3 5 3H19C19.55 3 20.0208 3.19583 20.4125 3.5875C20.8042 3.97917 21 4.45 21 5V19C21 19.55 20.8042 20.0208 20.4125 20.4125C20.0208 20.8042 19.55 21 19 21H5ZM5 19H19V5H5V19ZM6 17H18L14.25 12L11.25 16L9 13L6 17Z' fill='black' fill-opacity='0.45'/></svg>");
-		}
-
-		.image-panel.loaded::before {
-			content: none;
-		}
-
-		.image-panel img {
-			display: none;
-			max-width: 100%;
-			max-height: 360px;
-			border-radius: 4px;
-		}
-
-		.image-panel.loaded img {
-			display: block;
-		}
-
-		.image-message {
-			font-size: 14px;
-		}
-
-		.thumbnail {
-			width: 32px;
-			height: 32px;
-			object-fit: cover;
-			border-radius: 4px;
-			flex-shrink: 0;
 		}
 
 		@media (max-width: 600px) {
@@ -691,12 +580,11 @@
 <body onload="initialize_widgets()">
 	<div class="page-layout" id="layout">
 		<div class="generative-content">
-			<div class="top">Visual question answering</div>
-			<div class="image-panel" id="image-panel" tabindex="0" role="button" aria-label="Add an image">
-				<img id="image-preview" alt="Image to ask questions about">
-				<div class="image-message" id="image-message">Click to choose an image, or drop or paste one here</div>
+			<div class="top">Question answering</div>
+			<div class="key-panel">
+				<label for="api-key">OpenAI API key</label>
+				<input type="password" id="api-key" placeholder="sk-..." autocomplete="off" spellcheck="false">
 			</div>
-			<input type="file" id="file-input" accept="image/*" hidden>
 			<div class="widget-layout" id="widget-layout"></div>
 		</div>
 	</div>
