@@ -1,0 +1,1479 @@
+<!DOCTYPE html>
+<html>
+
+<head>
+	<meta charset="utf-8">
+	<title>Generate Charts</title>
+
+	<script src="https://cdn.jsdelivr.net/npm/vega@5"></script>
+	<script src="https://cdn.jsdelivr.net/npm/vega-lite@5"></script>
+	<script src="https://cdn.jsdelivr.net/npm/vega-embed@6"></script>
+
+	<script>
+		const process_instructions = `
+### ROLE & OBJECTIVE
+You are a helpful assistant that generates Vega-Lite chart specifications based on the user's request for a data insight.
+CRITICAL: Prefer to visualize breakdowns or multiple categories within a SINGLE chart using visual cues like color, shape, or line styles, rather than splitting them into multiple faceted panels or separate charts. If faceted charts are absolutely necessary to avoid extreme clutter, prefer using \`column\` and \`row\` encoding channels within the main \`encoding\` block instead of the top-level \`facet\` operator.
+CRITICAL: Always provide the data inline using the 'values' property in the 'data' object. Do NOT reference external files like 'data.csv' or 'data.json'.
+CRITICAL: When asked to output a Vega-Lite JSON specification, output ONLY valid JSON.
+CRITICAL: Use Vega-Lite v5 syntax. For interaction and zooming, use the \`params\` property instead of the deprecated \`selection\` property.
+CRITICAL: In layered charts with interactive scales (\`bind: "scales"\`), define shared encodings (like \`x\`, \`y\`, \`color\`) in the top-level \`encoding\` block rather than duplicating them inside each layer. Duplicating them causes "Duplicate signal name" errors.
+CRITICAL: In layered charts with interactions or selections (using \`params\` and \`select\`), define the \`params\` block and the interactive/conditional encoding (such as interactive \`opacity\` or \`color\`) directly inside the specific layer that requires the interaction, rather than at the top level. Defining selections/parameters at the top level of a layered chart propagates them to all layers, causing "Duplicate signal name" errors (like duplicate \`highlight_tuple\` or \`highlight_store\`).
+CRITICAL: Do NOT generate any Vega-Lite JSON specifications in Steps 1, 2, 3, and 4. The final specification must ONLY be generated in Step 5.
+
+### DATA & FORMATTING RULES
+CRITICAL: When formatting percentages on axes or tooltips using the "%" specifier, ensure the underlying data values are decimals (e.g., 0.18 for 18%). If the data values are whole numbers (e.g., 18), do not use the "%" specifier as it multiplies by 100.
+CRITICAL: For time-series data with irregular intervals, use "quantitative" or "temporal" scale types for the time axis, rather than "ordinal", to maintain proportional visual distance between points.
+CRITICAL: When using "temporal" type for years represented as integers (e.g., 2013), Vega-Lite interprets them as milliseconds (mapping to 1970). If the data contains raw year numbers, prefer using "quantitative" type with "format": "d" and scale property "zero": false (e.g., "scale": {"zero": false}), or ensure the data values are strings (e.g., "2013"). Do not use "timeUnit": "year" with raw year integers.
+
+### CHART SIZING & SCALES
+CRITICAL: For most charts, set \`width\` to 680 to fill the available space in the UI. Do not use \`width: "container"\`.
+CRITICAL: Choose dimensions that result in a visually balanced aspect ratio appropriate for the data. A landscape ratio (width > height) is typically best for time-series and comparisons to show progression or differences clearly. A square aspect ratio is often better when comparing two continuous variables on similar scales or when symmetry helps interpretation. For bar charts, choose the orientation and size based on the number of categories and label lengths to ensure bars have a reasonable thickness and labels are legible. Avoid extreme aspect ratios that make the chart hard to read.
+CRITICAL: For time-series data, ensure the axis scale domains (especially for time) are tightly bound to the data range. Do not hardcode domains that result in large empty spaces at the edges of the chart.
+CRITICAL: When adding text labels or annotations near peaks or chart edges, ensure they do not get clipped by the chart frame. Use \`nice: true\` on continuous scales or manually extend the scale domain to provide enough padding for the text.
+CRITICAL: To avoid legends being clipped, place them above or below the plot (\`"orient": "top"\` or \`"orient": "bottom"\`) or as an overlay inside the chart (using \`"orient": "none"\` with \`legendX\` and \`legendY\`). Avoid using \`"orient": "right"\` as the width is already set to fill the space.`;
+
+		const step1_instructions = `
+Determine what kind of dataset and what kind of chart would be best for visualizing the insight. 
+Return a brief description of the dataset and chart.
+CRITICAL: Do NOT generate any data values or Vega-Lite JSON specifications in this step.`;
+
+		const step2_instructions = `
+Use the search tool to find a suitable real-world dataset or current data points for the request. 
+If found, describe the source and structure and include the tag [DATASET_FOUND].
+If you synthesize or consolidate data from several sources, respond with more details about the specific data sources and the specific parts of the chart that the different data sources apply to.
+If a suitable dataset cannot be identified, include the tag [DATASET_NOT_FOUND] and explain why.
+Do not state that you cannot browse the web.
+CRITICAL: Do NOT generate any data values or Vega-Lite JSON specifications in this step.`;
+
+		const step3_instructions = `
+If a real dataset was not identified in Step 2, create a mathematical or statistical model based upon 
+real-world parameters to simulate the dataset. Describe the model and its parameters.
+CRITICAL: When simulating data, ensure that the variance and fluctuations are realistic and sufficient to show interesting trends. Avoid overly conservative parameters (like < 1% variance) that result in flat or static-looking charts, unless the user explicitly asks for a stable trend.
+CRITICAL: Do NOT generate any data values or Vega-Lite JSON specifications in this step.`;
+
+		const step4_instructions = `
+Generate the full dataset values inline based on the strategy or simulation model developed in previous steps.
+CRITICAL: Do NOT generate any Vega-Lite JSON specifications in this step. Only generate the data values.`;
+
+		const step5_instructions = `
+Generate the final valid Vega-Lite JSON specification with all data inline. Adhere to all critical rules.`;
+
+		var widget_spec = {
+			min_prompt: 1,
+			placeholder_text: "Describe a data insight",
+			button_text: "Generate chart",
+			progress_blink: "\xa0\xa0. . .",
+			step1_progress: "Thinking about data and charts",
+			step2_progress: "Looking for dataset",
+			step3_progress: "Creating model to simulate data",
+			step4_progress: "Generating data",
+			step5_progress: "Generating chart"
+		};
+
+		var api_spec = {
+		
+			// Key: "Generate Web Things"
+			// Billing period: No time-limit
+			// Project: google.com:grux-shared
+			key: "AQ.Ab8RN6LA3ES2CT_M_sCXr3JVZOoAbtEvfa9HnFMpmxYfNQgLqQ",
+			
+			// Active model index, resets on each prompt submission
+			current_model_index: 0,
+
+			// Fallback cascade models
+			models: [
+				"gemini-3.5-flash",
+				"gemini-3-flash-preview",
+				"gemini-2.5-flash",
+				"gemini-1.5-flash"
+			],
+
+			// For other models see https://ai.google.dev/gemini-api/docs#rest
+			get url() {
+				const model = this.models[this.current_model_index] || "gemini-3.5-flash";
+				return "https://generativelanguage.googleapis.com/v1beta/models/" + model + ":generateContent";
+			},
+			
+			// Maximum number of attempts in case of connection/parsing errors.
+			get retries() {
+				return 5;
+			},
+
+			// Maximum number of attempts for 503 / 429 rate-limits before failing.
+			get max_rate_retries() {
+				return 8;
+			},
+		};
+
+		// Calls the Gemini API with retry logic and update progress cues in UI
+		async function call_gemini(contents, progress_element, progress_text, error_prefix = "Error", signal = null) {
+			let attempt = 0;
+
+			while (true) {
+				attempt++;
+				const url = api_spec.url + "?key=" + api_spec.key;
+
+				var request = {
+					"contents": contents,
+					"systemInstruction": {
+						"parts": [{ "text": process_instructions }]
+					},
+					"tools": [{ "googleSearch": {} }]
+				};
+
+				try {
+					const response = await fetch(url, {
+						"method": "POST",
+						"headers": { "Content-Type": "application/json" },
+						"body": JSON.stringify(request),
+						"signal": signal
+					});
+
+					if (!response.ok) {
+						const is_rate_limit = response.status === 429 || response.status === 503;
+						const is_deprecated = response.status === 404 || response.status === 400 || response.status === 403;
+
+						// If the model has been deprecated or is unsupported, fall back instantly to the next model
+						if (is_deprecated && api_spec.current_model_index < api_spec.models.length - 1) {
+							api_spec.current_model_index++;
+							const next_model = api_spec.models[api_spec.current_model_index];
+							progress_element.innerHTML = `<span class="spinner"></span>${progress_text}: Error ${response.status} (Model Deprecated), switching instantly to fallback: ${next_model}<span class="blink">${widget_spec.progress_blink}</span>`;
+							await new Promise(resolve => setTimeout(resolve, 1000));
+							continue;
+						}
+
+						const max_allowed_retries = is_rate_limit ? api_spec.max_rate_retries : api_spec.retries;
+
+						if (attempt < max_allowed_retries) {
+							let attempt_str = ` ${attempt}x`;
+
+							// Switch to fallback model if rate limited or 503 persists
+							let model_switched_str = "";
+							if (is_rate_limit && attempt >= 3 && api_spec.current_model_index < api_spec.models.length - 1) {
+								api_spec.current_model_index++;
+								const next_model = api_spec.models[api_spec.current_model_index];
+								model_switched_str = ` (switching to fallback: ${next_model})`;
+							}
+
+							progress_element.innerHTML = `<span class="spinner"></span>${progress_text}: Error ${response.status}, retrying${attempt_str}${model_switched_str}<span class="blink">${widget_spec.progress_blink}</span>`;
+							
+							// Exponential backoff + jitter
+							const base_delay = 2000;
+							const jitter = Math.random() * 1000;
+							const wait_time = Math.min(base_delay * Math.pow(2, attempt - 1) + jitter, 30000);
+							
+							await new Promise(resolve => setTimeout(resolve, wait_time));
+							continue;
+						}
+
+						throw new Error(`HTTP error - ${response.status}`);
+					}
+
+					const json_response = await response.json();
+					const response_text = json_response.candidates?.[0]?.content?.parts?.[0]?.text;
+
+					if (!response_text) {
+						const finish_reason = json_response.candidates?.[0]?.finishReason;
+						let msg = "Unexpected API response structure";
+						if (finish_reason) msg += ` (Finish Reason: ${finish_reason})`;
+						throw new Error(msg);
+					}
+
+					return response_text;
+
+				} catch (error) {
+					if (error.name === 'AbortError') throw error;
+
+					if (attempt >= api_spec.retries) {
+						throw error;
+					}
+
+					let attempt_str = ` ${attempt}x`;
+					let model_switched_str = "";
+					if (attempt >= 3 && api_spec.current_model_index < api_spec.models.length - 1) {
+						api_spec.current_model_index++;
+						const next_model = api_spec.models[api_spec.current_model_index];
+						model_switched_str = ` (switching to fallback: ${next_model})`;
+					}
+
+					progress_element.innerHTML = `<span class="spinner"></span>${progress_text}: ${error.message}, retrying${attempt_str}${model_switched_str}<span class="blink">${widget_spec.progress_blink}</span>`;
+					
+					// Exponential backoff + jitter for connection issues
+					const base_delay = 2000;
+					const jitter = Math.random() * 1000;
+					const wait_time = Math.min(base_delay * Math.pow(2, attempt - 1) + jitter, 30000);
+					await new Promise(resolve => setTimeout(resolve, wait_time));
+				}
+			}
+		}
+
+		// Execute a single generation step, update progress, and create a zippy with includes deeper info
+		async function run_step(contents, widget, step_instructions, progress_text, error_prefix, summary_text, signal) {
+			const step_div = document.createElement('div');
+			step_div.className = "step-result running";
+			widget.output.insertBefore(step_div, widget.spacer);
+			step_div.innerHTML = `<span class="spinner"></span>` + progress_text + `<span class="blink">${widget_spec.progress_blink}</span>`;
+
+			contents.push({ "role": "user", "parts": [{ "text": step_instructions }] });
+			let response = await call_gemini(contents, step_div, progress_text, error_prefix, signal);
+
+			step_div.classList.remove("running");
+
+			// Create zippy
+			const details = document.createElement('details');
+			const summary = document.createElement('summary');
+			summary.innerHTML = `<span class="checkmark">✓</span>` + summary_text;
+			enable_hover_on_move(summary);
+
+			const pre = document.createElement('pre');
+			pre.textContent = response;
+			pre.className = "zippy-content";
+			
+			collapse_on_click(pre, details);
+
+			details.appendChild(summary);
+			details.appendChild(pre);
+
+			step_div.innerHTML = ''; // Clear progress text
+			step_div.appendChild(details);
+
+			contents.push({ "role": "model", "parts": [{ "text": response }] });
+
+			return { response, div: step_div };
+		}
+
+		// Orchestrate the full 5-step chart generation process sequentially.
+		async function generate_response(widget, is_regenerate = false) {
+			api_spec.current_model_index = 0; // Reset cascade model index for a fresh prompt
+			document.body.classList.add("generation-in-progress");
+			finish_input(widget);
+
+			if (!widget.div.classList.contains("complete")) {
+				widget.div.classList.add("complete");
+				widget.prompt.appendChild(document.createTextNode(widget.input));
+			}
+
+			// Remove existing action buttons
+			const existing_buttons = widget.prompt.querySelectorAll('.regenerate-button, .remove-button, .stop-button');
+			existing_buttons.forEach(b => b.remove());
+
+			widget.abort_controller = new AbortController();
+			add_action(widget, "stop-button", "Stop");
+
+			widget.output.classList.remove("error");
+			widget.output.innerHTML = ''; // Clear previous output
+
+			if (is_regenerate) {
+				const widget_layout = document.getElementById("widget-layout");
+				const last_widget = widget_layout.lastElementChild;
+				if (last_widget && !last_widget.classList.contains("complete")) {
+					last_widget.remove();
+				}
+			}
+
+			widget.spacer = document.createElement('div');
+			widget.spacer.style.height = "32px";
+			widget.output.appendChild(widget.spacer);
+
+			const observer = new MutationObserver(() => {
+				widget.spacer.scrollIntoView({ behavior: "smooth", block: "nearest" });
+			});
+			observer.observe(widget.output, { childList: true, subtree: true });
+
+			let contents = [];
+			try {
+				// Step 1
+				await run_step(contents, widget, widget.input + "\n\n" + step1_instructions, widget_spec.step1_progress, "Step 1 Error", "Data and chart concept", widget.abort_controller.signal);
+
+				// Step 2
+				let step2 = await run_step(contents, widget, step2_instructions, widget_spec.step2_progress, "Step 2 Error", "Dataset source identified", widget.abort_controller.signal);
+
+				const summary = step2.div.querySelector('summary');
+				if (step2.response.includes("[DATASET_FOUND]")) {
+					summary.innerHTML = `<span class="checkmark">✓</span>Data source`;
+				} else if (step2.response.includes("[DATASET_NOT_FOUND]")) {
+					summary.innerHTML = `<span class="checkmark">✓</span>Can't find dataset`;
+				}
+
+				// Check if dataset was found
+				const dataset_found = step2.response.includes("[DATASET_FOUND]");
+
+				if (!dataset_found) {
+					// Step 3
+					await run_step(contents, widget, step3_instructions, widget_spec.step3_progress, "Step 3 Error", "Simulation model", widget.abort_controller.signal);
+
+					// Step 4
+					let step4 = await run_step(contents, widget, step4_instructions, widget_spec.step4_progress, "Step 4 Error", "Dataset (simulated)", widget.abort_controller.signal);
+					step4.div.classList.add("step4-result");
+				}
+
+				// Step 5
+				let step5 = await run_step(contents, widget, step5_instructions, widget_spec.step5_progress, "Step 5 Error", "Chart spec", widget.abort_controller.signal);
+				
+				let success = await show_results_in_container(widget, step5.response, step5.div, is_regenerate);
+				
+				if (success) {
+					const step4_div = widget.output.querySelector('.step4-result');
+					if (step4_div) step4_div.remove();
+				}
+
+			} catch (error) {
+				// Remove incomplete steps
+				const running_steps = widget.output.querySelectorAll('.step-result.running');
+				running_steps.forEach(s => s.remove());
+
+				if (error.name === 'AbortError') {
+					const stop_div = document.createElement('div');
+					stop_div.className = "step-result error";
+					stop_div.innerHTML = `<span class="stop-symbol">⏹</span>Generation stopped by user.`;
+					widget.output.insertBefore(stop_div, widget.spacer);
+				} else {
+					show_error(widget, error.message || error);
+				}
+
+			} finally {
+				observer.disconnect();
+				const btn = widget.prompt.querySelector('.stop-button');
+				if (btn) btn.remove();
+
+				widget.abort_controller = null;
+				if (widget.spacer) widget.spacer.remove();
+
+				// Remove active generation indicator if no other widgets are running
+				const running = Array.from(document.querySelectorAll(".widget")).some(w => w._widget && w._widget.abort_controller !== null);
+				if (!running) {
+					document.body.classList.remove("generation-in-progress");
+				}
+
+				// Add a new empty widget at the end if there isn't one already
+				const has_incomplete = Array.from(document.querySelectorAll(".widget")).some(w => !w.classList.contains("complete"));
+				if (!has_incomplete) {
+					add_widget();
+				}
+				finish_output(widget);
+			}
+		}
+
+		// Applies heuristic repairs to the Vega-Lite specification to fix common LLM errors.
+		function repair_spec(spec) {
+			if (!spec || typeof spec !== "object") return spec;
+
+			// Repair date/year outlier values (e.g. typos like 1918 instead of 2018)
+			repair_year_outliers(spec);
+
+			function repair_year_outliers(s) {
+				if (!s || !s.data || !Array.isArray(s.data.values) || s.data.values.length < 3) {
+					return;
+				}
+
+				let timeField = null;
+				if (s.encoding) {
+					for (const channel in s.encoding) {
+						const enc = s.encoding[channel];
+						if (enc && enc.field && (enc.type === "quantitative" || enc.type === "temporal")) {
+							const fieldName = enc.field.toLowerCase();
+							if (fieldName.includes("year") || fieldName.includes("date") || fieldName.includes("time")) {
+								timeField = enc.field;
+								break;
+							}
+						}
+					}
+				}
+
+				if (!timeField) return;
+
+				const values = s.data.values;
+
+				function parseVal(v) {
+					if (typeof v === "number") return v;
+					if (typeof v === "string") {
+						const parsed = Number(v);
+						if (!isNaN(parsed)) return parsed;
+						const parsedDate = Date.parse(v);
+						if (!isNaN(parsedDate)) return parsedDate;
+					}
+					return null;
+				}
+
+				function formatVal(originalVal, numericVal) {
+					if (typeof originalVal === "number") {
+						return Math.round(numericVal);
+					}
+					if (typeof originalVal === "string") {
+						const parsed = Number(originalVal);
+						if (!isNaN(parsed)) {
+							return String(Math.round(numericVal));
+						}
+						const date = new Date(numericVal);
+						if (!isNaN(date.getTime())) {
+							if (originalVal.length === 10) {
+								return date.toISOString().split('T')[0];
+							}
+							return date.toISOString();
+						}
+					}
+					return originalVal;
+				}
+
+				const numericList = [];
+				for (let i = 0; i < values.length; i++) {
+					const num = parseVal(values[i][timeField]);
+					if (num !== null) numericList.push(num);
+				}
+
+				if (numericList.length < 3) return;
+
+				const uniqueVals = Array.from(new Set(numericList)).sort((a, b) => a - b);
+				if (uniqueVals.length < 3) return;
+
+				const diffs = [];
+				for (let i = 0; i < uniqueVals.length - 1; i++) {
+					diffs.push(uniqueVals[i+1] - uniqueVals[i]);
+				}
+
+				function getMedian(arr) {
+					if (arr.length === 0) return 0;
+					const sorted = arr.slice().sort((a, b) => a - b);
+					const mid = Math.floor(sorted.length / 2);
+					return sorted.length % 2 !== 0 ? sorted[mid] : (sorted[mid - 1] + sorted[mid]) / 2;
+				}
+
+				const medianDiff = getMedian(diffs);
+				if (medianDiff === 0) return;
+
+				const threshold = 5;
+				const outliers = new Set();
+				const maxOutlierRatio = 0.15;
+				const maxOutliers = Math.max(1, Math.floor(uniqueVals.length * maxOutlierRatio));
+
+				let idx = 0;
+				while (idx < uniqueVals.length - 1) {
+					if (uniqueVals[idx+1] - uniqueVals[idx] > threshold * medianDiff) {
+						const count = idx + 1;
+						if (count <= maxOutliers) {
+							for (let j = 0; j <= idx; j++) {
+								outliers.add(uniqueVals[j]);
+							}
+						}
+						break;
+					}
+					idx++;
+				}
+
+				idx = uniqueVals.length - 1;
+				while (idx > 0) {
+					if (uniqueVals[idx] - uniqueVals[idx-1] > threshold * medianDiff) {
+						const count = uniqueVals.length - idx;
+						if (count <= maxOutliers) {
+							for (let j = idx; j < uniqueVals.length; j++) {
+								outliers.add(uniqueVals[j]);
+							}
+						}
+						break;
+					}
+					idx--;
+				}
+
+				if (outliers.size === 0) return;
+
+				let categoryField = null;
+				if (s.encoding && s.encoding.color && s.encoding.color.field) {
+					categoryField = s.encoding.color.field;
+				}
+
+				for (let i = 0; i < values.length; i++) {
+					const rawVal = values[i][timeField];
+					const num = parseVal(rawVal);
+					if (num !== null && outliers.has(num)) {
+						const categoryVal = categoryField ? values[i][categoryField] : null;
+
+						let prevVal = null;
+						for (let j = i - 1; j >= 0; j--) {
+							const pNum = parseVal(values[j][timeField]);
+							if (pNum !== null && !outliers.has(pNum)) {
+								if (!categoryField || values[j][categoryField] === categoryVal) {
+									prevVal = pNum;
+									break;
+								}
+							}
+						}
+
+						let nextVal = null;
+						for (let j = i + 1; j < values.length; j++) {
+							const nNum = parseVal(values[j][timeField]);
+							if (nNum !== null && !outliers.has(nNum)) {
+								if (!categoryField || values[j][categoryField] === categoryVal) {
+									nextVal = nNum;
+									break;
+								}
+							}
+						}
+
+						let replacementNum = null;
+						if (prevVal !== null && nextVal !== null) {
+							replacementNum = (prevVal + nextVal) / 2;
+						} else if (prevVal !== null) {
+							replacementNum = prevVal + medianDiff;
+						} else if (nextVal !== null) {
+							replacementNum = nextVal - medianDiff;
+						}
+
+						if (replacementNum !== null) {
+							values[i][timeField] = formatVal(rawVal, replacementNum);
+						}
+					}
+				}
+			}
+
+			// Define the recursive repair function
+			function repair_node(node, parentNode = null) {
+				if (!node || typeof node !== "object") return;
+
+				// 1. Recursively process child/sub-specs first
+				if (node.layer && Array.isArray(node.layer)) {
+					// Filter out any null/undefined/empty layers
+					node.layer = node.layer.filter(l => l && typeof l === "object" && Object.keys(l).length > 0);
+					node.layer.forEach(l => repair_node(l, node));
+				}
+				if (node.concat && Array.isArray(node.concat)) {
+					node.concat = node.concat.filter(c => c && typeof c === "object");
+					node.concat.forEach(c => repair_node(c, node));
+				}
+				if (node.hconcat && Array.isArray(node.hconcat)) {
+					node.hconcat = node.hconcat.filter(c => c && typeof c === "object");
+					node.hconcat.forEach(c => repair_node(c, node));
+				}
+				if (node.vconcat && Array.isArray(node.vconcat)) {
+					node.vconcat = node.vconcat.filter(c => c && typeof c === "object");
+					node.vconcat.forEach(c => repair_node(c, node));
+				}
+				if (node.spec && typeof node.spec === "object") {
+					repair_node(node.spec, node);
+				}
+
+				// 2. Repair: Remove top-level mark if layer is present to avoid signal scope conflicts
+				if (node.mark && node.layer && node.layer.length > 0) {
+					delete node.mark;
+				}
+
+				// 3. Repair: Ensure unit spec (spec without layers/concats) has a mark if it has encoding
+				const isUnitSpec = !node.layer && !node.concat && !node.hconcat && !node.vconcat && !node.spec;
+				if (isUnitSpec && node.encoding && !node.mark) {
+					node.mark = "point"; // default mark to avoid marktype of undefined error
+				}
+
+				// 4. Repair: Convert deprecated selection to params for Vega-Lite v5
+				if (node.selection && !node.params) {
+					node.params = [];
+					for (const name in node.selection) {
+						node.params.push({
+							name: name,
+							select: node.selection[name]
+						});
+					}
+					delete node.selection;
+				}
+
+				// 5. Repair: dx and dy as top-level encoding channels are invalid. Move them to mark.
+				if (node.encoding) {
+					if (node.encoding.dx !== undefined) {
+						let val = node.encoding.dx;
+						if (val && typeof val === "object" && val.value !== undefined) val = val.value;
+						if (node.mark) {
+							if (typeof node.mark === "string") node.mark = { type: node.mark };
+							if (typeof node.mark === "object") node.mark.dx = val;
+						}
+						delete node.encoding.dx;
+					}
+					if (node.encoding.dy !== undefined) {
+						let val = node.encoding.dy;
+						if (val && typeof val === "object" && val.value !== undefined) val = val.value;
+						if (node.mark) {
+							if (typeof node.mark === "string") node.mark = { type: node.mark };
+							if (typeof node.mark === "object") node.mark.dy = val;
+						}
+						delete node.encoding.dy;
+					}
+				}
+
+				// 6. Repair: If legend has invalid 'disable' property, clean it up
+				if (node.encoding) {
+					for (const channel in node.encoding) {
+						const enc = node.encoding[channel];
+						if (enc && enc.legend && typeof enc.legend === "object") {
+							if (enc.legend.disable !== undefined) {
+								if (enc.legend.disable === true) {
+									enc.legend = null;
+								} else {
+									delete enc.legend.disable;
+								}
+							}
+						}
+					}
+				}
+
+				// 7. Repair: Fix invalid formatting strings (e.g. $0.2fM -> $0.2f with labelExpr datum.label + 'M')
+				if (node.encoding) {
+					for (const channel in node.encoding) {
+						const enc = node.encoding[channel];
+						if (!enc) continue;
+
+						// Axis format
+						if (enc.axis && enc.axis.format) {
+							if (enc.type !== "temporal" && !enc.axis.format.startsWith("%")) {
+								const rep = repair_format_string(enc.axis.format);
+								if (rep.valid) {
+									enc.axis.format = rep.d3Part;
+									if (!enc.axis.labelExpr) {
+										enc.axis.labelExpr = `datum.label + ${JSON.stringify(rep.suffix)}`;
+									}
+								}
+							}
+						}
+
+						// Encoding-level format (e.g. for text or tooltips)
+						if (enc.format) {
+							if (enc.type !== "temporal" && !enc.format.startsWith("%")) {
+								const rep = repair_format_string(enc.format);
+								if (rep.valid) {
+									enc.format = rep.d3Part;
+								}
+							}
+						}
+					}
+
+					// Tooltip array formats
+					if (node.encoding.tooltip && Array.isArray(node.encoding.tooltip)) {
+						node.encoding.tooltip.forEach(tt => {
+							if (tt && tt.format) {
+								if (tt.type !== "temporal" && !tt.format.startsWith("%")) {
+									const rep = repair_format_string(tt.format);
+									if (rep.valid) {
+										tt.format = rep.d3Part;
+									}
+								}
+							}
+						});
+					}
+				}
+
+				// 8. Repair: Convert temporal years represented as integers to quantitative
+				const dataValues = node.data?.values || spec.data?.values;
+				if (node.encoding && dataValues && Array.isArray(dataValues) && dataValues.length > 0) {
+					for (const channel in node.encoding) {
+						const enc = node.encoding[channel];
+						if (enc && enc.type === "temporal" && enc.timeUnit === "year") {
+							const field = enc.field;
+							const first_val = dataValues[0]?.[field];
+							if (typeof first_val === "number") {
+								enc.type = "quantitative";
+								delete enc.timeUnit;
+								if (!enc.axis) enc.axis = {};
+								enc.axis.format = "d";
+								
+								// Fix tooltips if present
+								if (node.encoding.tooltip && Array.isArray(node.encoding.tooltip)) {
+									const tt = node.encoding.tooltip.find(t => t && t.field === field);
+									if (tt) {
+										tt.type = "quantitative";
+										delete tt.timeUnit;
+										tt.format = "d";
+									}
+								}
+							}
+						}
+					}
+				}
+
+				// 9. Repair: If a quantitative scale is used for a field named "Year" (case-insensitive), ensure it has scale: {zero: false} to prevent starting at year 0
+				if (node.encoding) {
+					for (const channel in node.encoding) {
+						const enc = node.encoding[channel];
+						if (enc && enc.field && enc.field.toLowerCase().includes("year") && enc.type === "quantitative") {
+							if (!enc.scale) enc.scale = {};
+							if (enc.scale.zero === undefined) {
+								enc.scale.zero = false;
+							}
+						}
+					}
+				}
+			}
+
+			// Helper to parse and split invalid formatting strings
+			function repair_format_string(formatStr) {
+				if (typeof formatStr !== "string") return { valid: false };
+				
+				// Regex matching d3 format specifier and capturing the invalid trailing text
+				const d3Regex = /^([^\s{}<>=^]?[<>=^])?([+\- ]?)([$#]?)(0?)(\d*)(,?)(\.\d+)?(~?)([a-zA-Z%])(.*)$/;
+				const match = formatStr.match(d3Regex);
+				
+				if (match) {
+					const suffix = match[10];
+					if (suffix) {
+						const d3Part = formatStr.slice(0, formatStr.length - suffix.length);
+						return { valid: true, d3Part: d3Part, suffix: suffix };
+					}
+				}
+				return { valid: false };
+			}
+
+			// Start recursive traversal from root
+			repair_node(spec);
+
+			// Top-level specific repairs that involve layers coordinating
+
+			// 10. Repair: Remove unnecessary layer wrapper if only one layer is present
+			if (spec.layer && spec.layer.length === 1 && !spec.mark) {
+				spec.mark = spec.layer[0].mark;
+				if (spec.layer[0].encoding) {
+					spec.encoding = {...spec.encoding, ...spec.layer[0].encoding};
+				}
+				delete spec.layer;
+			}
+
+			// 11. Repair: Fix invalid domain/domainRaw referencing a param (common LLM error for zoom)
+			if (spec.encoding) {
+				for (const channel in spec.encoding) {
+					const scale = spec.encoding[channel].scale;
+					if (scale) {
+						let paramName = null;
+						if (scale.domainRaw && scale.domainRaw.param) {
+							paramName = scale.domainRaw.param;
+							delete scale.domainRaw;
+						} else if (scale.domain && scale.domain.param) {
+							paramName = scale.domain.param;
+							delete scale.domain;
+						}
+						
+						if (paramName && spec.params) {
+							const param = spec.params.find(p => p.name === paramName);
+							if (param && param.select) {
+								const type = spec.encoding[channel].type;
+								if (spec.encoding[channel].timeUnit) {
+									console.warn("Skipping scale binding because timeUnit is present on " + channel);
+								} else if (type !== "quantitative" && type !== "temporal") {
+									console.warn("Skipping scale binding because channel type is not continuous: " + type);
+								} else {
+									param.bind = "scales";
+								}
+							}
+						}
+					}
+				}
+			}
+
+			// 12. Repair: Restrict scale bindings to continuous channels only
+			if (spec.params) {
+				spec.params.forEach(param => {
+					if (param.bind === "scales" && spec.encoding) {
+						const continuousChannels = [];
+						for (const channel in spec.encoding) {
+							const type = spec.encoding[channel].type;
+							if ((type === "quantitative" || type === "temporal") && !spec.encoding[channel].timeUnit) {
+								continuousChannels.push(channel);
+							}
+						}
+						if (continuousChannels.length > 0) {
+							if (typeof param.select === "string") {
+								param.select = { type: param.select, encodings: continuousChannels };
+							} else if (typeof param.select === "object") {
+								param.select.encodings = continuousChannels;
+							}
+						} else {
+							delete param.bind;
+						}
+					}
+				});
+			}
+
+			// 13. Repair: Pull up nested params from group layers to prevent "Unrecognized signal name" errors in child/sibling layers
+			if (spec.layer) {
+				if (!spec.params) spec.params = [];
+				
+				const extractGroupParams = (layers) => {
+					layers.forEach(layer => {
+						if (layer.layer && layer.params && !layer.mark) {
+							layer.params.forEach(p => {
+								if (!spec.params.some(topP => topP.name === p.name)) {
+									spec.params.push(p);
+								}
+							});
+							delete layer.params;
+						}
+						if (layer.layer) {
+							extractGroupParams(layer.layer);
+						}
+					});
+				};
+				
+				extractGroupParams(spec.layer);
+				if (spec.params.length === 0) delete spec.params;
+			}
+
+			// 14. Repair: Move top-level interactive scale-bound params to the first layer to avoid "Duplicate signal name" scale errors in layered charts
+			if (spec.layer && spec.layer.length > 1 && spec.params) {
+				if (!spec.layer[0].params) spec.layer[0].params = [];
+				if (!spec.layer[0].encoding) spec.layer[0].encoding = {};
+
+				spec.params = spec.params.filter(param => {
+					if (param.bind === "scales" || (param.bind && param.bind.scale)) {
+						spec.layer[0].params.push(param);
+
+						if (spec.encoding) {
+							for (const channel in spec.encoding) {
+								const enc = spec.encoding[channel];
+								if (enc && enc.condition && enc.condition.param === param.name) {
+									spec.layer[0].encoding[channel] = enc;
+									delete spec.encoding[channel];
+								}
+							}
+						}
+						return false;
+					}
+					return true;
+				});
+
+				if (spec.params.length === 0) delete spec.params;
+			}
+
+			// 15. Repair: Deduplicate params to avoid "Duplicate signal name" errors
+			const seenParams = new Set();
+			const deduplicateParams = (node) => {
+				if (!node) return;
+				if (node.params) {
+					node.params = node.params.filter(p => {
+						if (seenParams.has(p.name)) return false;
+						seenParams.add(p.name);
+						return true;
+					});
+					if (node.params.length === 0) delete node.params;
+				}
+				if (node.layer) {
+					node.layer.forEach(l => deduplicateParams(l));
+				}
+			};
+			deduplicateParams(spec);
+
+			if (spec.width === "container") delete spec.width;
+			if (spec.height === "container") delete spec.height;
+			
+			// Enforce transparent background
+			spec.background = "transparent";
+			
+			return spec;
+		}
+
+		// Parses the LLM response, applies repairs, and embeds the Vega chart in the UI.
+		async function show_results_in_container(widget, text, container, is_regenerate) {
+			// Extract JSON block if present
+			const json_match = text.match(/```(?:json)?\s*([\s\S]*?)\s*```/);
+			let cleaned_text = text;
+			if (json_match) {
+				cleaned_text = json_match[1];
+			} else {
+				// Fallback: try to find first { and last }
+				const first_brace = text.indexOf('{');
+				const last_brace = text.lastIndexOf('}');
+				if (first_brace !== -1 && last_brace !== -1 && last_brace > first_brace) {
+					cleaned_text = text.substring(first_brace, last_brace + 1);
+				}
+			}
+
+			cleaned_text = cleaned_text.trim()
+				.replace(/,\s*([\]}])/g, '$1') // Remove trailing commas
+				.replace(/"format":\s*"([^"]*)%b([^"]*)"/g, '"format": "$1%m$2"'); // Fix invalid format %b
+
+			try {
+				let spec = JSON.parse(cleaned_text);
+				spec = repair_spec(spec);
+
+				const chart_div = document.createElement('div');
+				chart_div.style.marginTop = "10px";
+				chart_div.style.marginBottom = "6px";
+				chart_div.style.position = "relative";
+				chart_div.style.paddingRight = "30px";
+				container.appendChild(chart_div);
+
+				await vegaEmbed(chart_div, spec, {
+					logger: {
+						level: vega.Warn,
+						error: function(msg) {
+							console.error("Vega Error:", msg);
+							show_error(widget, "Vega Error: " + msg);
+						}
+					}
+				});
+				widget.div.scrollIntoView({ behavior: "smooth", block: "nearest" });
+				return true;
+			} catch (error) {
+				// Avoid duplicate zippy by just showing the error message
+				const err_div = document.createElement('div');
+				err_div.className = "step-result error warning-error";
+				err_div.textContent = error.message || error;
+				container.appendChild(err_div);
+				return false;
+			}
+		}
+
+		function show_error(widget, message = "Error") {
+			const err_div = document.createElement('div');
+			err_div.className = "step-result error warning-error";
+			err_div.textContent = message;
+			widget.output.insertBefore(err_div, widget.spacer);
+		}
+
+		function get_widget_from_event(event) {
+			var widget_div = event.target.closest(".widget");
+			return widget_div ? widget_div._widget : null;
+		}
+
+		function send_prompt(event) {
+			var widget = get_widget_from_event(event);
+			widget.input = widget.textarea.value.trim();
+			generate_response(widget);
+		}
+
+		function listen_to_prompt(event) {
+			var widget = get_widget_from_event(event);
+			var input = widget.textarea.value.trim();
+			if (input.length < widget_spec.min_prompt) widget.generate.classList.add('disabled');
+			else widget.generate.classList.remove('disabled');
+		}
+
+		function listen_to_typing(event) {
+			var textarea = event.target;
+			var input = textarea.value.trim();
+			if (event.keyCode != 13 || input.length < widget_spec.min_prompt) return;
+			send_prompt(event);
+		}
+
+		function get_new_element(type, class_name = null, id = null) {
+			var div = document.createElement(type);
+			if (class_name != null) div.classList.add(class_name);
+			if (id != null) div.id = id;
+			return div;
+		}
+
+		function enable_hover_on_move(element) {
+			element.classList.add("no-hover");
+			element.addEventListener('mousemove', function removeHover() {
+				element.classList.remove("no-hover");
+				element.removeEventListener('mousemove', removeHover);
+			});
+		}
+
+		function collapse_on_click(content, details) {
+			content.addEventListener('click', () => {
+				if (window.getSelection().isCollapsed) {
+					details.open = false;
+				}
+			});
+		}
+
+		function finish_input(widget) {
+			if (widget.textarea) {
+				widget.prompt.removeChild(widget.textarea);
+				widget.textarea = null;
+			}
+			if (widget.generate) {
+				widget.prompt.removeChild(widget.generate);
+				widget.generate = null;
+			}
+		}
+
+		function finish_output(widget) {
+			widget.div.classList.add("complete");
+			add_action(widget, "regenerate-button", "Regenerate");
+			add_action(widget, "remove-button", "Remove");
+		}
+
+		function add_action(widget, class_name, tooltip_text) {
+			var button = document.createElement("div");
+			button.classList.add(class_name);
+			var tooltip = document.createElement("div");
+			tooltip.classList.add("tooltip");
+			tooltip.textContent = tooltip_text;
+			button.appendChild(tooltip);
+			widget.prompt.appendChild(button);
+			return button;
+		}
+
+		function remove_widget(event) {
+			var widget = get_widget_from_event(event);
+			if (widget) {
+				widget.div.remove();
+			}
+		}
+
+		// Add a new prompt-and-response widget to the page
+		function add_widget() {
+			var widget_layout = document.getElementById("widget-layout");
+			if (widget_layout.querySelector(".widget:not(.complete)")) {
+				return;
+			}
+			var widget = {
+				input: null,
+				div: get_new_element("div", "widget"),
+				prompt: get_new_element("div", "prompt"),
+				textarea: get_new_element("textarea"),
+				generate: get_new_element("div", "generate-button"),
+				output: get_new_element("div", "response"),
+				abort_controller: null
+			};
+			widget.div._widget = widget;
+			widget.generate.classList.add("disabled");
+			widget_layout.appendChild(widget.div);
+			widget.div.appendChild(widget.prompt);
+			widget.prompt.appendChild(widget.textarea);
+			widget.prompt.appendChild(widget.generate);
+			widget.div.appendChild(widget.output);
+			widget.textarea.setAttribute("placeholder", widget_spec.placeholder_text);
+			widget.generate.textContent = widget_spec.button_text;
+			widget.textarea.focus();
+			var layout = document.getElementById("layout");
+			layout.scrollTo({ top: layout.scrollHeight, behavior: "smooth" });
+		}
+
+		// Sets up global event delegation listeners for all widgets.
+		function initialize_widgets() {
+			var widget_layout = document.getElementById("widget-layout");
+			widget_layout.addEventListener("click", function (event) {
+				var target = event.target;
+				if (target.closest(".generate-button")) {
+					send_prompt(event);
+				} else if (target.closest(".remove-button")) {
+					remove_widget(event);
+				} else if (target.closest(".regenerate-button")) {
+					var widget = get_widget_from_event(event);
+					if (widget) {
+						generate_response(widget, true);
+					}
+				} else if (target.closest(".stop-button")) {
+					var widget = get_widget_from_event(event);
+					if (widget && widget.abort_controller) {
+						widget.abort_controller.abort();
+					}
+				}
+			});
+
+			// Add listener for example clicks
+			document.addEventListener("click", function (event) {
+				var target = event.target;
+				if (target.closest(".example")) {
+					if (document.body.classList.contains("generation-in-progress")) {
+						return;
+					}
+					var text = target.closest(".example").textContent.trim();
+					var widgets = widget_layout.querySelectorAll(".widget");
+					var last_widget = widgets[widgets.length - 1];
+					var widget_obj = last_widget ? last_widget._widget : null;
+					
+					// If the last widget is already in use, create a new one
+					if (!widget_obj || (widget_obj.textarea && widget_obj.textarea.value.trim() !== "")) {
+						add_widget();
+						widgets = widget_layout.querySelectorAll(".widget");
+						last_widget = widgets[widgets.length - 1];
+						widget_obj = last_widget._widget;
+					}
+					
+					if (widget_obj && widget_obj.textarea) {
+						widget_obj.textarea.value = text;
+						widget_obj.input = text;
+						widget_obj.generate.classList.remove("disabled");
+						widget_obj.textarea.focus();
+						
+						// Adjust textarea height to content
+						widget_obj.textarea.style.height = 'auto';
+						widget_obj.textarea.style.height = widget_obj.textarea.scrollHeight + 'px';
+
+						// Trigger generation immediately
+						generate_response(widget_obj);
+					}
+				}
+			});
+			widget_layout.addEventListener("input", function (event) {
+				if (event.target.tagName === "TEXTAREA") {
+					listen_to_prompt(event);
+				}
+			});
+			widget_layout.addEventListener("change", function (event) {
+				if (event.target.tagName === "TEXTAREA") {
+					listen_to_prompt(event);
+				}
+			});
+			widget_layout.addEventListener("keypress", function (event) {
+				if (event.target.tagName === "TEXTAREA") {
+					listen_to_typing(event);
+				}
+			});
+			add_widget();
+		}
+	</script>
+
+	<link href="https://fonts.googleapis.com/css?family=Google+Sans+Code&display=swap" rel="stylesheet">
+
+	<style>
+		body {
+			margin: 0;
+			padding: 0;
+			overflow: hidden;
+		}
+		body,
+		textarea {
+			font-family: "Google Sans", Arial, sans-serif;
+			font-size: 14px;
+			line-height: 18px;
+			color: #000;
+		}
+
+		.page-layout {
+			width: 100%;
+			height: 100vh;
+			overflow-x: hidden;
+			overflow-y: scroll;
+			scrollbar-width: thin;
+		}
+
+		.generative-content {
+			max-width: 760px;
+			margin: 40px auto 80px auto;
+			overflow: hidden;
+		}
+		
+		.vega-actions {
+			right: 20px !important;
+		}
+
+		.widget {
+			position: relative;
+			border-radius: 8px;
+			margin-top: 8px;
+		}
+
+		.widget:first-child {
+			margin-top: 14px;
+		}
+
+		.prompt {
+			display: grid;
+			grid-template-columns: repeat(2, min-content);
+			grid-column-gap: 16px;
+			margin-top: 12px;
+		}
+
+		.widget.complete .prompt {
+			display: flex;
+			align-items: center;
+			column-gap: 8px;
+			font-weight: 500;
+			color: #3c4043;
+			background-color: #ffffff;
+			border: 1px solid #bdc1c6;
+			padding: 4px 6px 4px 13px;
+			border-radius: 8px;
+			width: max-content;
+			height: max-content;
+			min-height: 32px;
+			max-width: 520px;
+			margin: 0;
+		}
+
+		textarea {
+			width: 520px;
+			padding: 8px 12px 8px 13px;
+			border: 1px solid #bdc1c6;
+			border-radius: 8px;
+			outline: none;
+			resize: none;
+			field-sizing: content;
+			min-height: 48px;
+			margin-top: 3px;
+		}
+
+		textarea::placeholder {
+			color: #9aa0a6;
+		}
+
+		.generate-button {
+			display: inline-block;
+			height: 32px;
+			line-height: 32px;
+			padding: 0 16px 0 10px;
+			border-radius: 16px;
+			white-space: nowrap;
+			font-weight: 500;
+			color: #5f6368;
+			background-color: #c8e9fd;
+			border-style: none;
+			user-select: none;
+			cursor: pointer;
+		}
+
+		.generate-button::before {
+			content: url("data:image/svg+xml; utf8, <svg width='20' height='20' xmlns='http://www.w3.org/2000/svg'><path d='M6.66663 15.83V4.17L15.83 10L6.67 15.83ZM8.33 12.79L12.71 10L8.33 7.21V12.79Z' fill='black' fill-opacity='0.65'/></svg>");
+			position: relative;
+			top: 5px;
+			margin-right: 4px;
+		}
+
+		.generate-button:hover {
+			filter: drop-shadow(0px 1px 1px rgba(0, 0, 0, 0.3));
+		}
+
+		.generate-button.disabled {
+			background-color: #ffffff;
+			border: 1px solid #bdc1c6;
+			opacity: 0.5;
+			pointer-events: none;
+		}
+
+		.blink {
+			animation: blink 1s step-start infinite;
+			font-weight: bold;
+		}
+
+		@keyframes blink {
+			50% {
+				opacity: 0;
+			}
+		}
+
+		.response {
+			margin: 12px 12px;
+		}
+
+		.remove-button,
+		.regenerate-button,
+		.stop-button {
+			position: relative;
+			width: 32px;
+			height: 32px;
+			border-radius: 16px;
+			user-select: none;
+			cursor: pointer;
+		}
+
+		.tooltip {
+			visibility: hidden;
+			position: absolute;
+			z-index: 1;
+			top: 125%;
+			left: 50%;
+			transform: translateX(-50%);
+			font-size: 13px;
+			line-height: 16px;
+			color: #fff;
+			background-color: rgba(45, 45, 45, 1);
+			border-radius: 4px;
+			padding: 4px 8px;
+			white-space: nowrap;
+			filter: drop-shadow(0px 1px 1px rgba(0, 0, 0, 0.3));
+		}
+
+		.remove-button:hover .tooltip,
+		.regenerate-button:hover .tooltip,
+		.stop-button:hover .tooltip {
+			visibility: visible;
+		}
+
+		.remove-button::before,
+		.regenerate-button::before,
+		.stop-button::before {
+			position: relative;
+			top: 4px;
+			left: 4px;
+		}
+
+		.remove-button::before {
+			content: url("data:image/svg+xml; utf8, <svg width='24' height='24' xmlns='http://www.w3.org/2000/svg'><path d='M7 21C6.45 21 5.97917 20.8042 5.5875 20.4125C5.19583 20.0208 5 19.55 5 19V6H4V4H9V3H15V4H20V6H19V19C19 19.55 18.8042 20.0208 18.4125 20.4125C18.0208 20.8042 17.55 21 17 21H7ZM17 6H7V19H17V6ZM9 17H11V8H9V17ZM13 17H15V8H13V17Z' fill='black' fill-opacity='0.65'/></svg>");
+		}
+
+		.regenerate-button::before {
+			content: url("data:image/svg+xml; utf8, <svg width='24' height='24' xmlns='http://www.w3.org/2000/svg'><path d='M12 20C9.76667 20 7.875 19.225 6.325 17.675C4.775 16.125 4 14.2333 4 12C4 9.76667 4.775 7.875 6.325 6.325C7.875 4.775 9.76667 4 12 4C13.15 4 14.25 4.2375 15.3 4.7125C16.35 5.1875 17.25 5.86667 18 6.75V4H20V11H13V9H17.2C16.6667 8.06667 15.9375 7.33333 15.0125 6.8C14.0875 6.26667 13.0833 6 12 6C10.3333 6 8.91667 6.58333 7.75 7.75C6.58333 8.91667 6 10.3333 6 12C6 13.6667 6.58333 15.0833 7.75 16.25C8.91667 17.4167 10.3333 18 12 18C13.2833 18 14.4417 17.6333 15.475 16.9C16.5083 16.1667 17.2333 15.2 17.65 14H19.75C19.2833 15.7667 18.3333 17.2083 16.9 18.325C15.4667 19.4417 13.8333 20 12 20Z' fill='black' fill-opacity='0.65'/></svg>");
+		}
+
+		.stop-button::before {
+			content: url("data:image/svg+xml; utf8, <svg width='24' height='24' xmlns='http://www.w3.org/2000/svg'><rect x='6' y='6' width='12' height='12' rx='2' fill='black' fill-opacity='0.15' stroke='black' stroke-opacity='0.45' stroke-width='0.7'/></svg>");
+		}
+
+		.remove-button:hover,
+		.regenerate-button:hover,
+		.stop-button:hover {
+			background-color: #c8e9fd;
+		}
+
+		.error {
+			font-style: italic;
+			color: #c92786;
+		}
+
+		.top {
+			color: #202124;
+			margin-left: 8px;
+		}
+
+		.top .headline {
+			font-weight: 500;
+			margin-bottom: 6px;
+		}
+
+		.top .example {
+			font-style: italic;
+			color: #3c4043;
+			cursor: pointer;
+			border-radius: 6px;
+			padding: 4px 10px 4px 6px;
+			transition: background-color 0.2s ease;
+			width: fit-content;
+		}
+
+		.generation-in-progress .top .example {
+			opacity: 0.5;
+			pointer-events: none;
+		}
+
+		.top .example:hover {
+			background-color: #f1f3f4;
+		}
+
+		.top .example::after {
+			content: url("data:image/svg+xml; utf8, <svg width='10' height='12' viewBox='0 0 20 20' preserveAspectRatio='none' xmlns='http://www.w3.org/2000/svg'><path d='M0 0L0 20L20 10Z' fill='black' fill-opacity='0.25'/></svg>");
+			display: inline-block;
+			vertical-align: middle;
+			margin-left: 8px;
+			opacity: 0;
+			transition: opacity 0.2s ease;
+		}
+
+		.top .example:hover::after {
+			opacity: 1;
+		}
+
+		.step-result {
+			margin-top: 0px;
+			padding: 0;
+			color: #202124;
+			font-size: 14px;
+		}
+
+		.step-result.running,
+		.step-result.error,
+		.step-result summary {
+			padding: 4px 0 4px 8px;
+			margin-left: -8px;
+		}
+
+		.spinner {
+			box-sizing: border-box;
+			border: 2px solid #e8eaed;
+			border-top: 2px solid #1a73e8;
+			border-radius: 50%;
+			width: 16px;
+			height: 16px;
+			animation: spin 1s linear infinite;
+			display: inline-block;
+			margin-right: 10px;
+			vertical-align: middle;
+		}
+
+		@keyframes spin {
+			0% { transform: rotate(0deg); }
+			100% { transform: rotate(360deg); }
+		}
+
+		.checkmark,
+		.stop-symbol {
+			display: inline-block;
+			width: 16px;
+			text-align: center;
+			margin-right: 10px;
+			font-weight: bold;
+			vertical-align: middle;
+			line-height: 16px;
+		}
+
+		.checkmark {
+			color: #5f6368;
+			font-size: 14px;
+		}
+
+		.step-result summary {
+			cursor: pointer;
+			list-style: none;
+			border-radius: 4px;
+		}
+
+		.step-result summary::-webkit-details-marker {
+			display: none;
+		}
+
+		.step-result summary::after {
+			content: url("data:image/svg+xml; utf8, <svg width='16' height='16' viewBox='0 0 24 24' fill='none' xmlns='http://www.w3.org/2000/svg'><path d='M7 10L12 15L17 10' stroke='black' stroke-opacity='0.65' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'/></svg>");
+			display: inline-block;
+			vertical-align: middle;
+			margin-left: 6px;
+			transition: transform 0.2s ease;
+			transform: rotate(-90deg);
+		}
+
+		.step-result details[open] summary::after {
+			transform: rotate(0deg);
+		}
+
+		.step-result summary:hover:not(.no-hover) {
+			background-color: #c8e9fd;
+		}
+
+		.zippy-content {
+			white-space: pre-wrap;
+			margin-top: 4px;
+			font-size: 12px;
+			color: #3c4043;
+			background-color: #f2f4f5;
+			border-radius: 8px;
+			padding: 8px 12px 8px 12px;
+		}
+
+		.step-result.error {
+			color: #c92786;
+			margin-top: 2px;
+			margin-bottom: 20px;
+		}
+
+		.warning-error::before {
+			content: url("data:image/svg+xml; utf8, <svg xmlns='http://www.w3.org/2000/svg' height='16px' viewBox='0 -960 960 960' width='16px' fill='%23c92786'><path d='m40-120 440-760 440 760H40Zm468.5-131.5Q520-263 520-280t-11.5-28.5Q497-320 480-320t-28.5 11.5Q440-297 440-280t11.5 28.5Q463-240 480-240t28.5-11.5ZM440-360h80v-200h-80v200Z'/></svg>");
+			display: inline-block;
+			width: 16px;
+			text-align: center;
+			margin-right: 10px;
+			vertical-align: middle;
+			line-height: 16px;
+		}
+
+		.stop-symbol {
+			color: #c92786;
+			font-size: 18px;
+			font-style: normal;
+		}
+	</style>
+</head>
+
+<body onload="initialize_widgets()">
+	<div class="page-layout" id="layout">
+		<div class="generative-content">
+			<div class="top">
+				<div class="headline">Generate charts. Try prompts like</div>
+				<div class="example">Enriched uranium in Iran by year from 2000 to 2026</div>
+				<div class="example">Yo-yo sales from 1980 to 2024 by year normalized for inflation</div>
+				<div class="example">Supply vs demand for rubbing alcohol from 2019 to 2024 by month</div>
+				<div class="example">Correlation of personal income with life span for years 1950, 1975, 2000, 2025</div>
+				<div class="example">Effects of AI on job market</div>
+				<div class="example">Biodiversity trends</div>
+			</div>
+			<div class="widget-layout" id="widget-layout"></div>
+		</div>
+	</div>
+</body>
+
+</html>
