@@ -90,6 +90,11 @@
 				}
 				catch (error) {
 					error_message = "Error fetching OpenAI response: " + error.message;
+					// OpenAI's error responses carry no CORS headers, so the browser hides
+					// them and fetch only reports a network failure
+					if (error instanceof TypeError) {
+						error_message += ". OpenAI most likely rejected the request: check that the API key is correct, that your account has billing set up, and that it can use the model " + api_spec.model + ".";
+					}
 					break;
 				}
 			}
