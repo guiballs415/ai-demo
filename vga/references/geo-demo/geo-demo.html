@@ -1,0 +1,79 @@
+<!doctype html>
+<html lang="en">
+
+	<head>
+		<meta charset="utf-8">
+		<meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
+		<meta http-equiv="Pragma" content="no-cache">
+		<meta http-equiv="Expires" content="0">
+		<meta name="color-scheme" content="light">
+		<title>Geographical AI Demo</title>
+		
+
+		<link rel="stylesheet" href="geo-demo.css">
+
+		<script src="https://cdn.jsdelivr.net/npm/vega@5"></script>
+		<script src="https://cdn.jsdelivr.net/npm/vega-lite@5"></script>
+		<script src="https://cdn.jsdelivr.net/npm/vega-embed@6"></script>
+		<script src="geo-charts.js"></script>
+		<script src="geo-maps.js"></script>
+		<script src="geo-agent.js"></script>
+		<script src="geo-chat.js"></script>
+		<script src="geo-reload.js"></script>
+	</head>
+
+	<body>
+		<div class="page-wrapper">
+			<div class="chat-stream-container">
+				<div class="top" id="welcome-screen">
+					<div class="headline">Welcome to an Earth AI UX demo</div>
+					<div class="description">
+						<p>
+							See how Earth AI might look in a web app that isn't map-oriented.
+							Focus on the information architecture and style rather than the quality of the LLM output.
+						</p>
+						<p>
+							<b>Note:</b> Data is retrieved and analyzed by a rudimentary client-side harness for the public Gemini API.
+						</p>
+					</div>
+					<p class="description" style="margin-bottom: 4px;"><b>Try prompts like:</b></p>
+					<div class="example">Population of California counties</div>
+					<div class="example">Crop yields in the midwest over the last 10 years</div>
+					<div class="example">Wildfire perimeters in Oregon in 2023</div>
+					<div class="example">Find areas in the Congo Basin where natural forest cover decreased by over 10% between 2020 and 2025, and highlight sections overlapping indigenous reserve boundaries</div>
+				</div>
+				<div class="chat" id="chat"></div>
+				<div class="input-container">
+					<div class="input-prompt-box">
+						<textarea id="user-textarea" placeholder="Enter prompt"></textarea>
+						<button id="send-btn" class="request-button disabled" aria-label="Send prompt"></button>
+					</div>
+					<div class="input-footer">
+						<div class="disclaimer">This is a generative AI experiment. Accuracy and quality may vary.</div>
+						<div class="custom-dropdown-container">
+							<input type="hidden" id="workflow-mode" value="execute">
+							<div class="custom-dropdown-selected">Auto-execute</div>
+							<div class="custom-dropdown-options" id="workflow-dropdown-options">
+								<div class="custom-dropdown-option selected">
+									<div class="option-title">Auto-execute</div>
+									<div class="option-desc">Don't wait to confirm plans</div>
+								</div>
+								<div class="custom-dropdown-option">
+									<div class="option-title">Review plans</div>
+									<div class="option-desc">Confirm plans before executing them</div>
+								</div>
+							</div>
+						</div>
+					</div>
+				</div>
+			</div>
+		</div>
+
+		<div class="stamp">GEO AI UX DEMO</div>
+		<div class="popup" id="popup">
+			<div class="close-button"></div>
+		</div>
+		<script src="geo-init.js"></script>
+	</body>
+</html>
+
